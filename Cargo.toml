@@ -1,0 +1,25 @@
+[package]
+name = "rhytm"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+# logging
+log = "*"
+humansize = "*"
+indicatif = { version = "*", features = ["improved_unicode"] }
+indicatif-log-bridge = "*"
+simplelog = { version = "*", features = ["paris"] }
+
+# python
+pyo3 = "*"
+
+#SerDe
+serde = "*"
+serde_json = "*"
+
+interprocess = "*"
+anyhow = "*"
+regex = "*"
