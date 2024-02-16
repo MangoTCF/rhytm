@@ -20,6 +20,8 @@ pyo3 = "*"
 serde = "*"
 serde_json = "*"
 
-interprocess = "*"
 anyhow = "*"
 regex = "*"
+num-traits = "*"
+num-derive = "*"
+tokio = {version = "*", features = ["net", "rt-multi-thread", "macros"]}
