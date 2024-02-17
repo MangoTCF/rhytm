@@ -17,7 +17,7 @@ simplelog = { version = "*", features = ["paris"] }
 pyo3 = "*"
 
 #SerDe
-serde = "*"
+serde = { version = "*" , features = ["derive"] }
 serde_json = "*"
 
 anyhow = "*"

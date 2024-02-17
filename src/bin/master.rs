@@ -8,6 +8,7 @@ use std::{
 use core::mem::size_of;
 
 use num_traits::FromPrimitive;
+use serde_json::Value;
 
 use std::os::unix::net::UnixDatagram;
 
@@ -21,7 +22,7 @@ use log::{debug, info, log, warn, LevelFilter};
 use regex::Regex;
 use simplelog::{CombinedLogger, Config, TermLogger, TerminalMode};
 
-use crate::udde::{client_msgs, server_msgs};
+use crate::udde::{client_msgs, server_msgs, DownloadStatus};
 
 const THREAD_COUNT: usize = 1;
 const LINK_BATCH_SIZE: usize = 5;
@@ -281,6 +282,12 @@ async fn main() -> Result<()> {
 
                         let mut msg = vec![0; usize::from_ne_bytes(len)];
                         let b = master_socket.recv(&mut msg).expect("Unable to receive log message from thread");
+                        let json: DownloadStatus = serde_json::from_slice(&msg[..b]).expect("Unable to parse JSON from thread");
+
+                        if json.status == "finished" {
+                            std::fs::write(format!("/home/mango/pt/rhytm/test_output/{}.json", json.filename.replace("/", "_")), &msg[..b]).expect("Unable to write json");
+                        }
+                        //TODO: get the json model from wherever and parse it like that instead of stupid "Value" parsing
 
                         //TODO! parse the fucking JSON, *insert approximately six hours of selfharm*
                     }

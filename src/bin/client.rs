@@ -1,7 +1,6 @@
 #[path = "../udde.rs"]
 mod udde;
-use log::{info, warn, Level};
-use num_traits::ToBytes;
+use log::Level;
 use udde::server_msgs;
 
 use anyhow::{Ok, Result};
@@ -118,7 +117,6 @@ fn main() -> Result<()> {
 
                 let callback = Callback {
                     callback_function: |d, ud| {
-                        info!("Sending json to master thread: {:?}", d);
                         ud.send(&[udde::client_msgs::JSON as u8])
                             .expect("Callback: Unable to send JSON header");
                         let str = d.to_str().expect("Callback: Unable to parse json string");
