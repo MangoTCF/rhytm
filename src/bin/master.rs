@@ -2,14 +2,10 @@
 mod udde;
 
 use std::{
-    env,
-    fs::{self, Permissions},
-    io::{ErrorKind, Read},
-    os::unix::fs::PermissionsExt,
-    process::Command,
-    str::FromStr,
-    sync::{Arc, Mutex},
+    env, fs::{self, Permissions}, io::ErrorKind, os::unix::fs::PermissionsExt, process::Command, str::FromStr, sync::{Arc, Mutex}, time::Duration
 };
+
+use core::mem::size_of;
 
 use num_traits::FromPrimitive;
 
@@ -21,7 +17,7 @@ use indicatif::MultiProgress;
 use indicatif_log_bridge::LogWrapper;
 use tokio::task::JoinHandle;
 
-use log::{debug, info, warn, Level, LevelFilter};
+use log::{debug, info, log, warn, LevelFilter};
 use regex::Regex;
 use simplelog::{CombinedLogger, Config, TermLogger, TerminalMode};
 
@@ -57,20 +53,16 @@ async fn main() -> Result<()> {
 
     log::set_max_level(log::LevelFilter::Trace);
 
-    let path = "/home/mango/cleanhome/programming/rhytm/test_data/ytm.html"; //TODO: parse this from args
+    let path = "/home/mango/pt/rhytm/test_data/ytm.html"; //TODO: parse this from args
 
-    let mut soup = Vec::<u8>::new();
-    let bytes = fs::File::open(path)
-        .expect("Unable to open file")
-        .read_to_end(&mut soup)
-        .expect("Unable to read file");
-    debug!("Read {} bytes from {}", bytes, path);
+    let soup = fs::read_to_string(path)?;
+    debug!("Read {} bytes from {}", soup.len(), path);
 
     let regex = Regex::new(PARSE_REGEX_STR).unwrap(); //TODO?: parse this from args
 
     let links = Box::leak(Box::new(
         regex
-            .captures_iter(std::str::from_utf8(&soup)?)
+            .captures_iter(&soup)
             .map(|x| {
                 x.get(5)
                     .expect("Unable to find video ID capture")
@@ -107,8 +99,6 @@ async fn main() -> Result<()> {
             .expect("Unable to set permissions, exiting");
     }
 
-    let mut handles = Vec::<JoinHandle<_>>::with_capacity(THREAD_COUNT);
-
     // Ensure that all directories exist
     match std::fs::create_dir(DOWNLOAD_DIR).err() {
         Some(err) => {
@@ -135,9 +125,11 @@ async fn main() -> Result<()> {
         None => {}
     };
 
+    let mut handles = Vec::<(JoinHandle<_>, usize)>::with_capacity(THREAD_COUNT);
+
     for thr_id in 0..THREAD_COUNT {
         let mut hbuf = [0 as u8];
-        let mut sbuf = [0 as u8; 2048];
+        let mut sbuf = Vec::<u8>::new();
         let batches = Arc::clone(&batches);
         let msp = &format!("/tmp/rhytm/master-{}.sock", thr_id);
         let csp = &format!("/tmp/rhytm/thread-{}.sock", thr_id);
@@ -163,17 +155,21 @@ async fn main() -> Result<()> {
             UnixDatagram::bind(msp).expect(&format!("Unable to create socket @ {}", msp));
 
         // Spawn child
-        let client = Command::new(thread_path.clone())
+        let _client = Command::new(thread_path.clone())
             .arg(csp)
             .arg(msp)
-            .arg(stringify!(thr_id))
+            .arg(thr_id.to_string())
             .spawn()
             .with_context(|| format!("Unable to spawn thread {}", thr_id))?;
 
+        let to = master_socket.read_timeout()?;
+        master_socket.set_read_timeout(Some(Duration::from_millis(5000)))?;
         master_socket
             .recv(&mut hbuf)
             .expect("Unable to recieve greeting from client");
+        master_socket.set_read_timeout(to)?;
         if <client_msgs as FromPrimitive>::from_u8(hbuf[0]).unwrap() == client_msgs::Greeting {
+            debug!("Recved greeting from client");
             master_socket
                 .connect(csp)
                 .expect("Unable to connect to client");
@@ -185,21 +181,23 @@ async fn main() -> Result<()> {
         /*------------------//
         \\Tokio handler loop\\
         //------------------*/
+        debug!("Starting thread {}", thr_id);
         let handle = tokio::spawn(async move {
+            debug!("Thread {} functional", thr_id);
+            let thr_target = &format!("thread {}", thr_id);
             loop {
+
                 let (_, addr) = master_socket
                     .recv_from(&mut hbuf)
                     .expect("Unable to receive data from master socket");
 
                 match FromPrimitive::from_u8(hbuf[0]).unwrap_or_else(|| {
-                    let mut dbuf = [0; 4096];
-                    let bytes = master_socket.recv(&mut dbuf).unwrap_or(0);
-                    ;
+                    let bytes = master_socket.recv(&mut sbuf).unwrap_or(0);
                     panic!(
-                        "Wrong client packet header: {}, possible server/client version mismatch. Up to {}b of pending socket contents are:\n{}\n-----EOM-----",
+                        "Wrong client packet header: {}, possible server/client version mismatch. {}b of pending socket contents are:\n{:#?}\n-----EOM-----",
                         hbuf[0],
                         bytes,
-                        std::str::from_utf8(&dbuf[0..bytes]).unwrap_or(&format!("Unable to convert raw buffer contents into UTF-8, printing u8 values:\n{:#?}", &dbuf[0..bytes]))
+                        &sbuf[0..bytes]
                     )
                 }) {
                     client_msgs::BatchRequest => {
@@ -231,78 +229,75 @@ async fn main() -> Result<()> {
                                         thr_id
                                     ),
                                 );
+                                return;
                             }
                         };
                     }
                     client_msgs::Greeting => {
                         unimplemented!(
-                            "Unexpected greeting recieved from thread {}",
-                            addr.as_pathname()
-                                .unwrap()
-                                .file_stem()
-                                .unwrap()
-                                .to_str()
-                                .unwrap()[7..]
-                                .to_string()
+                            "Unexpected greeting recieved from socket {}",
+                            addr.as_pathname().unwrap().to_str().unwrap()
+
                         )
                     }
                     client_msgs::Log => {
                         debug!(
-                            "got log message from thread {}",
-                            addr.as_pathname()
-                                .unwrap()
-                                .file_stem()
-                                .unwrap()
-                                .to_str()
-                                .unwrap()[7..]
-                                .to_string()
+                            "got Log message from socket {}",
+                            addr.as_pathname().unwrap().to_str().unwrap()
+
                         );
 
                         let mut lbuf = [0; 5];
-                        master_socket.recv(&mut lbuf).expect(&format!(
+                        let b = master_socket.recv(&mut lbuf).expect(&format!(
                             "Unable to recieve log message from thread {}",
                             thr_id
                         ));
 
-                        match log::Level::from_str(
-                            std::str::from_utf8(&lbuf)
+                        let l = log::Level::from_str(
+                            std::str::from_utf8(&lbuf[..b])
                                 .expect(&format!("Invalid UTF-8 in thread {}", thr_id)),
                         )
-                        .expect(&format!("Unable to parse log level from thread {}", thr_id))
-                        {
-                            Level::Error => todo!(),
-                            Level::Warn => todo!(),
-                            Level::Info => todo!(),
-                            Level::Debug => todo!(),
-                            Level::Trace => {}
-                        };
+                        .expect(&format!("Unable to parse \"{}\" as log level from thread {}", std::str::from_utf8(&lbuf).unwrap(), thr_id));
+
+                        let mut len = [0; size_of::<usize>()];
+                        master_socket.recv(&mut len).expect("Unable to receive log message length from thread");
+                        
+                        let mut msg = vec![0; usize::from_ne_bytes(len)];
+
+                        let b = master_socket.recv(&mut msg).expect("Unable to receive log message from thread");
+                        
+                        
+                        log!(target: thr_target, l, "{}", std::str::from_utf8(&msg[..b]).expect("Unable to parse log message from thread"));
+
+
                     }
                     client_msgs::JSON => {
                         debug!(
-                            "got BatchRequest from thread {}",
-                            addr.as_pathname()
-                                .unwrap()
-                                .file_stem()
-                                .unwrap()
-                                .to_str()
-                                .unwrap()
-                        )
+                            "got JSON from socket {}",
+                            addr.as_pathname().unwrap().to_str().unwrap()
+                        );
+                        let mut len = [0; size_of::<usize>()];
+                        master_socket.recv(&mut len).expect("Unable to receive log message length from thread");
+
+                        let mut msg = vec![0; usize::from_ne_bytes(len)];
+                        let b = master_socket.recv(&mut msg).expect("Unable to receive log message from thread");
+
+                        //TODO! parse the fucking JSON, *insert approximately six hours of selfharm*
                     }
                 }
             }
         });
-        handles.push(handle);
+        handles.push((handle, thr_id));
         info!("Spawned thread {}", 0);
     }
 
-    //spawn child
+         for handle in handles {
+            match handle.0.await {
+                Ok(_) => {},
+                Err(e) => {warn!("Thread {} failed to finish: {}", handle.1, e)},
+            };
 
-    //TODO!: Create a "master" socket for each thread, spawn THREAD_COUNT tokio routines and handle the appropriate sockets in each one
-    //ffs this shit is hard to figure out
-
-    // loop {
-    //     let (b, addr) = master_socket.recv_from(&mut hbuf)?;
-    // }
+        }
 
     Ok(())
 }
