@@ -5,5 +5,21 @@
         "./Cargo.toml",
         "./Cargo.toml",
         "./Cargo.toml"
-    ]
+    ],
+    "rust-analyzer.rustfmt.extraArgs": [
+        "--edition",
+        "2021"
+    ],
+    "rust-analyzer.rustfmt.rangeFormatting.enable": true,
+    "rust-analyzer.rustfmt.overrideCommand": null,
+    "sqltools.connections": [
+        {
+            "previewLimit": 50,
+            "driver": "SQLite",
+            "name": "rhytm-dev-links",
+            "group": "dev",
+            "database": "${workspaceFolder:rhytm}/test_output/links.db"
+        }
+    ],
+    "sqltools.useNodeRuntime": true,
 }

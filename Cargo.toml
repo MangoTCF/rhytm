@@ -25,3 +25,5 @@ regex = "*"
 num-traits = "*"
 num-derive = "*"
 tokio = {version = "*", features = ["net", "rt-multi-thread", "macros"]}
+diesel = {version = "*", features = ["sqlite"]}
+diesel_migrations = {version = "*", features = ["sqlite"]}

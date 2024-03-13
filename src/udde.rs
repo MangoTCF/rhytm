@@ -1,3 +1,6 @@
+use diesel::sql_types::Date;
+use diesel::Queryable;
+use diesel::Selectable;
 use num_derive::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Result, Value};
@@ -17,14 +20,32 @@ pub enum server_msgs {
     EndRequest, // REQUEST_END => \
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Fragment { //TODO: Perpetual update
-    url: String, 
-    duration: f32
+// #[derive(Queryable, Selectable)]
+// #[diesel(check_for_backend(diesel))]
+// #[diesel(table_name = videos)]
+pub struct VideoRepr {
+    pub pk: String,
+    pub uid: String,
+    pub link: String,
+    pub title: String,
+    pub author: String,
+    pub duration: u64,
+    pub description: String,
+    pub thumbnail_path: String,
+    pub date: Date,
+    pub other: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Format { //TODO: Perpetual update
+pub struct Fragment {
+    //TODO: Perpetual update
+    url: String,
+    duration: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct Format {
+    //TODO: Perpetual update
     pub format_id: String,
     pub format_note: String,
     pub ext: String,
@@ -37,7 +58,7 @@ pub struct Format { //TODO: Perpetual update
     pub fps: f32,
     pub rows: u32,
     pub columns: u32,
-    pub fragments: Vec<Fragment>, 
+    pub fragments: Vec<Fragment>,
     pub resolution: String,
     pub aspect_ratio: f32,
     pub http_headers: Map<String, Value>,
@@ -45,12 +66,13 @@ pub struct Format { //TODO: Perpetual update
     pub video_ext: String,
     pub vbr: f32,
     pub abr: f32,
-    pub tbr: f32,
+    pub tbr: Option<f32>,
     pub format: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct Thumbnail { //TODO: Perpetual update
+pub struct Thumbnail {
+    //TODO: Perpetual update
     pub url: String,
     pub height: u32,
     pub width: u32,
@@ -60,13 +82,15 @@ pub struct Thumbnail { //TODO: Perpetual update
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct HeatPoint { //TODO: Perpetual update
+pub struct HeatPoint {
+    //TODO: Perpetual update
     start_time: f32,
     end_time: f32,
     value: f32,
 }
 #[derive(Serialize, Deserialize, Debug)]
-pub struct InfoDict { //TODO: Perpetual update
+pub struct InfoDict {
+    //TODO: Perpetual update
     pub id: String,
     pub title: String,
     pub formats: Vec<Format>,
@@ -161,7 +185,8 @@ pub struct InfoDict { //TODO: Perpetual update
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct DownloadStatus { //TODO: Perpetual update
+pub struct DownloadStatus {
+    //TODO: Perpetual update
     pub status: String,
     pub info_dict: InfoDict,
     pub filename: String,
