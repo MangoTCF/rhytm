@@ -46,6 +46,7 @@ impl Callback {
 }
 
 /**
+ * TODO: Make an init function and put all redundant code there
  * TODO: implement, accepts a self socket path, master socket path and thread id(?) as stdin args, starts download through yt_dlp, injecting callback into hooks, which communicates with master thread to update progress bars via FIFO
  */
 fn main() -> Result<()> {

@@ -14,10 +14,10 @@ use std::{
 
 use core::mem::size_of;
 
+use clap::Parser;
 use diesel::{sqlite, Connection};
-use diesel_migrations::embed_migrations;
+
 use num_traits::FromPrimitive;
-use serde_json::Value;
 
 use std::os::unix::net::UnixDatagram;
 
@@ -29,7 +29,7 @@ use tokio::task::JoinHandle;
 
 use log::{debug, info, log, warn, LevelFilter};
 use regex::Regex;
-use simplelog::{CombinedLogger, Config, TermLogger, TerminalMode};
+use simplelog::{error, CombinedLogger, Config, TermLogger, TerminalMode};
 
 use crate::udde::{client_msgs, server_msgs, DownloadStatus};
 
@@ -40,12 +40,40 @@ const DOWNLOAD_DIR: &str = "/home/mango/Radio/"; // TODO: parse from args
 const LOGS_DIR_RELATIVE: &str = "/logs/";
 const PARSE_REGEX_STR: &str = r"(https://(music)|(www)\.youtube\.com/)?(watch\?v=)([a-zA-Z0-9/\.\?=\-_]+)";
 
+#[derive(Parser, Debug)]
+#[command(version, author, about, long_about = None)]
+struct Options {
+    #[arg(short, long, default_value = "info")]
+    verbosity: LevelFilter,
+
+    #[arg(short='j', long, default_value_t = THREAD_COUNT)]
+    threads: usize,
+
+    #[arg(short='b', long, default_value_t = LINK_BATCH_SIZE)]
+    link_batch_size: usize,
+
+    #[arg(short, long, default_value = TMP_DIR)]
+    tmp_dir: String,
+
+    #[arg(short, long, default_value = DOWNLOAD_DIR)]
+    download_dir: String,
+
+    #[arg(short, long, default_value = LOGS_DIR_RELATIVE)]
+    logs_dir_relative: String,
+
+    #[arg(short, long, default_value = PARSE_REGEX_STR)]
+    parse_regex_str: String,
+
+    #[arg(required(true))]
+    html_path: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // std::panic::set_hook(Box::new(panic_hook));
+    let options = Options::parse();
 
     let logger = CombinedLogger::new(vec![TermLogger::new(
-        LevelFilter::Debug,
+        options.verbosity,
         Config::default(),
         TerminalMode::Mixed,
         simplelog::ColorChoice::Auto,
@@ -59,15 +87,12 @@ async fn main() -> Result<()> {
 
     log::set_max_level(log::LevelFilter::Trace);
 
-    let path = "/home/mango/pt/rhytm/test_data/ytm.html"; //TODO: parse this from args
+    let soup = fs::read_to_string(options.html_path.clone())?;
+    debug!("Read {} bytes from {}", soup.len(), options.html_path);
 
-    let soup = fs::read_to_string(path)?;
-    debug!("Read {} bytes from {}", soup.len(), path);
+    let regex = Regex::new(&options.parse_regex_str).unwrap(); //TODO?: parse this from args
 
-    let regex = Regex::new(PARSE_REGEX_STR).unwrap(); //TODO?: parse this from args
-
-    let migrations = embed_migrations!();
-    let db = sqlite::SqliteConnection::establish(&(DOWNLOAD_DIR.to_string() + "links.db"));
+    let db = sqlite::SqliteConnection::establish(&(options.download_dir.to_string() + "links.db"));
 
     let links = Box::leak(Box::new(
         regex
@@ -83,7 +108,7 @@ async fn main() -> Result<()> {
     ));
 
     info!("Found {} links", links.len());
-    let batches = Arc::new(Mutex::new(links.chunks(LINK_BATCH_SIZE)));
+    let batches = Arc::new(Mutex::new(links.chunks(options.link_batch_size)));
 
     // finding client exe
 
@@ -108,29 +133,29 @@ async fn main() -> Result<()> {
     }
 
     // Ensure that all directories exist
-    match std::fs::create_dir(DOWNLOAD_DIR).err() {
+    match std::fs::create_dir(options.download_dir.clone()).err() {
         Some(err) => {
             if err.kind() != ErrorKind::AlreadyExists {
-                panic!("Unable to create {}: {}", DOWNLOAD_DIR, err);
+                panic!("Unable to create {}: {}", options.download_dir, err);
             }
         }
         None => {}
     }
-    match std::fs::create_dir(DOWNLOAD_DIR.to_owned() + LOGS_DIR_RELATIVE).err() {
+    match std::fs::create_dir(options.download_dir.to_owned() + &options.logs_dir_relative).err() {
         Some(err) => {
             if err.kind() != ErrorKind::AlreadyExists {
                 panic!(
                     "Unable to create {}{}: {}",
-                    DOWNLOAD_DIR, LOGS_DIR_RELATIVE, err
+                    options.download_dir, options.logs_dir_relative, err
                 );
             }
         }
         None => {}
     };
-    match std::fs::create_dir(TMP_DIR).err() {
+    match std::fs::create_dir(options.tmp_dir.clone()).err() {
         Some(err) => {
             if err.kind() != ErrorKind::AlreadyExists {
-                panic!("Unable to create {}: {}", TMP_DIR, err);
+                panic!("Unable to create {}: {}", options.tmp_dir, err);
             }
         }
         None => {}
@@ -138,17 +163,17 @@ async fn main() -> Result<()> {
 
     let mut handles = Vec::<(JoinHandle<_>, usize)>::with_capacity(THREAD_COUNT);
 
-    for thr_id in 0..THREAD_COUNT {
+    for thr_id in 0..options.threads {
         let mut hbuf = [0 as u8];
         let mut sbuf = Vec::<u8>::new();
         let batches = Arc::clone(&batches);
-        let msp = &format!("{}/{}/master.sock", TMP_DIR, thr_id);
-        let csp = &format!("{}/{}/client.sock", TMP_DIR, thr_id);
+        let msp = &format!("{}/{}/master.sock", options.tmp_dir, thr_id);
+        let csp = &format!("{}/{}/client.sock", options.tmp_dir, thr_id);
 
-        match std::fs::create_dir(TMP_DIR.to_string() + "/" + &thr_id.to_string()).err() {
+        match std::fs::create_dir(options.tmp_dir.to_string() + "/" + &thr_id.to_string()).err() {
             Some(err) => {
                 if err.kind() != ErrorKind::AlreadyExists {
-                    panic!("Unable to create {}: {}", TMP_DIR, err)
+                    panic!("Unable to create {}: {}", options.tmp_dir, err)
                 }
                 match std::fs::remove_file(msp).err() {
                     Some(err) => {
@@ -174,6 +199,7 @@ async fn main() -> Result<()> {
         let master_socket = UnixDatagram::bind(msp).expect(&format!("Unable to create socket @ {}", msp));
 
         // Spawn child
+        //TODO: move from args to env
         let _client = Command::new(thread_path.clone())
             .arg(csp)
             .arg(msp)
@@ -303,22 +329,19 @@ async fn main() -> Result<()> {
                         let b = master_socket
                             .recv(&mut msg)
                             .expect("Unable to receive log message from thread");
-                        let json: DownloadStatus = serde_json::from_slice(&msg[..b]).unwrap_or_else(|err| {
-                            let path = "/home/mango/pt/rhytm/test_output/ohno.json";
-                            std::fs::write(path, &msg[..b]).expect("Unable to write json");
-                            panic!(
-                                "Unable to parse JSON from thread {}: {}\n!!JSON Written to {}!!",
-                                thr_id, err, path
-                            )
+                        let json: DownloadStatus = serde_json::from_slice(&msg[..b]).unwrap_or_else(|e| {
+                            std::fs::write("/home/mango/programming/rhytm/test_output/fucked.json", &msg[..b]).unwrap();
+                            error!("Parse failed @ {}:{}, message is {}", e.line(), e.column(), e);
+                            panic!("Fucking json")
                         });
 
                         if json.status == "finished" {
                             std::fs::write(
                                 format!(
-                                    "/home/mango/pt/rhytm/test_output/{}.json",
+                                    "/home/mango/programming/rhytm/test_output/{}.json",
                                     json.filename.replace("/", "_")
                                 ),
-                                &msg[..b],
+                                &serde_json::to_string_pretty(&json).unwrap(),
                             )
                             .expect("Unable to write json");
                         }
