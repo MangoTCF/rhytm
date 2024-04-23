@@ -1,9 +1,9 @@
 #[path = "../udde.rs"]
 mod udde;
 use log::Level;
-use udde::server_msgs;
+use udde::ServerMsgs;
 
-use anyhow::{Ok, Result};
+use anyhow::{Context, Ok, Result};
 
 use pyo3::{
     pyclass, pymethods,
@@ -11,7 +11,7 @@ use pyo3::{
     IntoPy, Python,
 };
 
-use std::os::unix::net::UnixDatagram;
+use std::{fmt::write, io::{self, Write}, os::unix::net::UnixDatagram};
 use std::process::exit;
 use std::{env, time::Duration};
 
@@ -63,7 +63,7 @@ fn main() -> Result<()> {
         .connect(args[2].clone())
         .expect("Unable to connect to master socket");
 
-    socket.send(&[udde::client_msgs::Greeting as u8])?;
+    socket.send(&[udde::ClientMsgs::Greeting as u8])?;
     socket
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("Unable to set socket timeout");
@@ -75,7 +75,7 @@ fn main() -> Result<()> {
     match num_traits::FromPrimitive::from_u8(hbuf[0])
         .expect("Wrong greeting, possible server/client version mismatch")
     {
-        server_msgs::Greeting => {}
+        ServerMsgs::Greeting => {}
         _ => {
             unimplemented!("Wrong greeting, possible server/client version mismatch")
         }
@@ -84,16 +84,16 @@ fn main() -> Result<()> {
     let mut sbuf = [0 as u8; 2048];
     pyo3::prepare_freethreaded_python();
     loop {
-        socket.send(&[udde::client_msgs::BatchRequest as u8])?;
+        socket.send(&[udde::ClientMsgs::BatchRequest as u8])?;
         socket.recv(&mut hbuf)?;
         match num_traits::FromPrimitive::from_u8(hbuf[0])
             .expect("Wrong batch header, possible server/client version mismatch")
         {
-            server_msgs::Greeting => {
+            ServerMsgs::Greeting => {
                 unimplemented!("Wrong batch header, possible server/client version mismatch")
             }
-            server_msgs::Batch => {}
-            server_msgs::EndRequest => {
+            ServerMsgs::Batch => {}
+            ServerMsgs::EndRequest => {
                 break;
             }
         }
@@ -115,15 +115,15 @@ fn main() -> Result<()> {
                         .expect("Python: Unable to open /dev/null"),
                 )
                 .expect("Python: Unable to set stderr to /dev/null");
-
                 let callback = Callback {
                     callback_function: |d, ud| {
-                        ud.send(&[udde::client_msgs::JSON as u8])
+                        ud.send(&[udde::ClientMsgs::JSON as u8])
                             .expect("Callback: Unable to send JSON header");
                         let str = d.to_str().expect("Callback: Unable to parse json string");
+                        std::fs::write("/home/mango/programming/rhytm/thr0.log", str.len().to_string().as_bytes()).unwrap();
                         ud.send(&str.len().to_ne_bytes())
                             .expect("Callback: Unable to send JSON length");
-                        ud.send(str.as_bytes())
+                        ud.send(str.as_bytes()).with_context(|| format!("length is {}", str.len()))
                             .expect("Callback: Unable to send json");
                     },
                     ud: socket.try_clone().expect(
@@ -138,7 +138,6 @@ fn main() -> Result<()> {
                     "\n\
                     import json\n\
                     def preproc_hook(dict):\n\
-                    \tprint(\"calling callback\")\n\
                     \tfn(json.dumps(dict))",
                     "",
                     "",
@@ -192,7 +191,7 @@ fn main() -> Result<()> {
 
                 let _ = youtube_dl.call_method1("download", (link,));
             });
-            socket.send(&[udde::client_msgs::Log as u8])?;
+            socket.send(&[udde::ClientMsgs::Log as u8])?;
             socket.send(Level::Info.as_str().as_bytes())?;
             let msg = format!("Thread {} finished downloading video ID {}", args[3], link);
             socket.send(&msg.len().to_ne_bytes())?;

@@ -31,7 +31,7 @@ use log::{debug, info, log, warn, LevelFilter};
 use regex::Regex;
 use simplelog::{error, CombinedLogger, Config, TermLogger, TerminalMode};
 
-use crate::udde::{client_msgs, server_msgs, DownloadStatus};
+use crate::udde::{ClientMsgs, ServerMsgs, DownloadStatus};
 
 const THREAD_COUNT: usize = 1;
 const LINK_BATCH_SIZE: usize = 5;
@@ -213,13 +213,13 @@ async fn main() -> Result<()> {
             .recv(&mut hbuf)
             .expect("Unable to recieve greeting from client");
         master_socket.set_read_timeout(to)?;
-        if <client_msgs as FromPrimitive>::from_u8(hbuf[0]).unwrap() == client_msgs::Greeting {
+        if <ClientMsgs as FromPrimitive>::from_u8(hbuf[0]).unwrap() == ClientMsgs::Greeting {
             debug!("Recved greeting from client");
             master_socket
                 .connect(csp)
                 .expect("Unable to connect to client");
             master_socket
-                .send(&[server_msgs::Greeting as u8])
+                .send(&[ServerMsgs::Greeting as u8])
                 .expect("Unable to send greeting to client");
         }
 
@@ -246,7 +246,7 @@ async fn main() -> Result<()> {
                         &sbuf[0..bytes]
                     )
                 }) {
-                    client_msgs::BatchRequest => {
+                    ClientMsgs::BatchRequest => {
                         debug!(
                             "got BatchRequest from socket {}",
                             addr.as_pathname().unwrap().to_str().unwrap()
@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
                         match batches.lock().unwrap().next() {
                             Some(x) => {
                                 master_socket
-                                    .send(&[server_msgs::Batch as u8])
+                                    .send(&[ServerMsgs::Batch as u8])
                                     .expect(&format!("Unable to send batch header to thread {}", thr_id));
 
                                 let batch_ser = x.join("\n");
@@ -267,7 +267,7 @@ async fn main() -> Result<()> {
                             None => {
                                 debug!("No batches left, sending EndRequest to thread {}", thr_id);
                                 master_socket
-                                    .send(&[server_msgs::EndRequest as u8])
+                                    .send(&[ServerMsgs::EndRequest as u8])
                                     .expect(&format!(
                                         "Unable to send EndRequest header to thread {}",
                                         thr_id
@@ -276,13 +276,13 @@ async fn main() -> Result<()> {
                             }
                         };
                     }
-                    client_msgs::Greeting => {
+                    ClientMsgs::Greeting => {
                         unimplemented!(
                             "Unexpected greeting recieved from socket {}",
                             addr.as_pathname().unwrap().to_str().unwrap()
                         )
                     }
-                    client_msgs::Log => {
+                    ClientMsgs::Log => {
                         debug!(
                             "got Log message from socket {}",
                             addr.as_pathname().unwrap().to_str().unwrap()
@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
                             .expect("Unable to receive log message from thread");
                         log!(target: thr_target, l, "{}", std::str::from_utf8(&msg[..b]).expect("Unable to parse log message from thread"));
                     }
-                    client_msgs::JSON => {
+                    ClientMsgs::JSON => {
                         debug!(
                             "got JSON from socket {}",
                             addr.as_pathname().unwrap().to_str().unwrap()
@@ -332,6 +332,9 @@ async fn main() -> Result<()> {
                         let json: DownloadStatus = serde_json::from_slice(&msg[..b]).unwrap_or_else(|e| {
                             std::fs::write("/home/mango/programming/rhytm/test_output/fucked.json", &msg[..b]).unwrap();
                             error!("Parse failed @ {}:{}, message is {}", e.line(), e.column(), e);
+                            error!("Context: {}", std::str::from_utf8(&msg[e.column()-20..e.column()+20]).unwrap());
+                            error!("                           ^");
+                            error!("                           \\-- Error is here");
                             panic!("Fucking json")
                         });
 
