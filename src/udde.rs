@@ -1,21 +1,19 @@
-use diesel::sql_types::Date;
-use num_derive::{FromPrimitive, ToPrimitive};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-#[derive(FromPrimitive, ToPrimitive, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ClientMsgs {
-    Greeting,     // GREETING => \
-    Log,          // LOG => log::Level as u8 => msg length as usize => log message
-    BatchRequest, // BATCH_REQUEST => \
-    JSON,         // JSON => json length as usize => serialized json from ytdlp
-}
-
-#[derive(FromPrimitive, ToPrimitive, PartialEq)]
-pub enum ServerMsgs {
-    Greeting,   // GREETING => \
-    Batch,      // BATCH => link count as u16 => links as a string, \n is the separator
-    EndRequest, // REQUEST_END => \
+    Greeting,
+    Log {
+        thr_id: usize,
+        level: log::Level,
+        target: String,
+        msg: String,
+    },
+    BatchRequest,
+    Batch(Vec<String>),
+    JSON(String),
+    EndRequest,
 }
 
 // #[derive(Queryable, Selectable)]

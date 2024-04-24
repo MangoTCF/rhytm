@@ -7,17 +7,18 @@ edition = "2021"
 
 [dependencies]
 # logging
-log = "*"
+log = { version = "*", features = ["serde"] }
 humansize = "*"
 indicatif = { version = "*", features = ["improved_unicode"] }
 indicatif-log-bridge = "*"
 simplelog = { version = "*", features = ["paris"] }
+interprocess = "*"
 
 # python
 pyo3 = "*"
 
 #SerDe
-serde = { version = "*" , features = ["derive"] }
+serde = { version = "*", features = ["derive"] }
 serde_json = "*"
 
 clap = { version = "*", features = ["derive"] }
@@ -25,6 +26,6 @@ anyhow = "*"
 regex = "*"
 num-traits = "*"
 num-derive = "*"
-tokio = {version = "*", features = ["net", "rt-multi-thread", "macros"]}
-diesel = {version = "*", features = ["sqlite"]}
-diesel_migrations = {version = "*", features = ["sqlite"]}
+tokio = { version = "*", features = ["net", "rt-multi-thread", "macros"] }
+diesel = { version = "*", features = ["sqlite"] }
+diesel_migrations = { version = "*", features = ["sqlite"] }

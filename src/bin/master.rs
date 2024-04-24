@@ -7,17 +7,12 @@ use std::{
     io::ErrorKind,
     os::unix::fs::PermissionsExt,
     process::Command,
-    str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use core::mem::size_of;
-
 use clap::Parser;
 use diesel::{sqlite, Connection};
-
-use num_traits::FromPrimitive;
 
 use std::os::unix::net::UnixDatagram;
 
@@ -31,7 +26,7 @@ use log::{debug, info, log, warn, LevelFilter};
 use regex::Regex;
 use simplelog::{error, CombinedLogger, Config, TermLogger, TerminalMode};
 
-use crate::udde::{ClientMsgs, ServerMsgs, DownloadStatus};
+use crate::udde::{ClientMsgs, DownloadStatus};
 
 const THREAD_COUNT: usize = 1;
 const LINK_BATCH_SIZE: usize = 5;
@@ -92,7 +87,7 @@ async fn main() -> Result<()> {
 
     let regex = Regex::new(&options.parse_regex_str).unwrap(); //TODO?: parse this from args
 
-    let db = sqlite::SqliteConnection::establish(&(options.download_dir.to_string() + "links.db"));
+    let _db = sqlite::SqliteConnection::establish(&(options.download_dir.to_string() + "links.db"));
 
     let links = Box::leak(Box::new(
         regex
@@ -164,36 +159,36 @@ async fn main() -> Result<()> {
     let mut handles = Vec::<(JoinHandle<_>, usize)>::with_capacity(THREAD_COUNT);
 
     for thr_id in 0..options.threads {
-        let mut hbuf = [0 as u8];
-        let mut sbuf = Vec::<u8>::new();
+        let mut buf = Vec::<u8>::new();
+        buf.resize(131072, 0);
+        debug!("{}", buf.capacity());
         let batches = Arc::clone(&batches);
         let msp = &format!("{}/{}/master.sock", options.tmp_dir, thr_id);
         let csp = &format!("{}/{}/client.sock", options.tmp_dir, thr_id);
 
-        match std::fs::create_dir(options.tmp_dir.to_string() + "/" + &thr_id.to_string()).err() {
-            Some(err) => {
+        match std::fs::create_dir(options.tmp_dir.to_string() + "/" + &thr_id.to_string()) {
+            Err(err) => {
                 if err.kind() != ErrorKind::AlreadyExists {
                     panic!("Unable to create {}: {}", options.tmp_dir, err)
                 }
-                match std::fs::remove_file(msp).err() {
-                    Some(err) => {
-                        if err.kind() != ErrorKind::NotFound {
-                            panic!("Unable to remove old socket @ {}: {}", msp, err);
-                        }
-                    }
-                    None => {}
-                };
-
-                match std::fs::remove_file(csp).err() {
-                    Some(err) => {
-                        if err.kind() != ErrorKind::NotFound {
-                            panic!("Unable to remove old socket @ {}: {}", csp, err);
-                        }
-                    }
-                    None => {}
-                };
             }
-            None => {}
+            Ok(_) => {}
+        };
+        match std::fs::remove_file(msp) {
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    panic!("Unable to remove old socket @ {}: {}", msp, err);
+                }
+            }
+            Ok(_) => {}
+        };
+        match std::fs::remove_file(csp) {
+            Err(err) => {
+                if err.kind() != ErrorKind::NotFound {
+                    panic!("Unable to remove old socket @ {}: {}", csp, err);
+                }
+            }
+            Ok(_) => {}
         };
 
         let master_socket = UnixDatagram::bind(msp).expect(&format!("Unable to create socket @ {}", msp));
@@ -209,17 +204,18 @@ async fn main() -> Result<()> {
 
         let to = master_socket.read_timeout()?;
         master_socket.set_read_timeout(Some(Duration::from_millis(5000)))?;
-        master_socket
-            .recv(&mut hbuf)
+
+        let bytes = master_socket
+            .recv(&mut buf)
             .expect("Unable to recieve greeting from client");
         master_socket.set_read_timeout(to)?;
-        if <ClientMsgs as FromPrimitive>::from_u8(hbuf[0]).unwrap() == ClientMsgs::Greeting {
+        if serde_json::from_slice::<ClientMsgs>(&buf[..bytes]).unwrap() == ClientMsgs::Greeting {
             debug!("Recved greeting from client");
             master_socket
                 .connect(csp)
                 .expect("Unable to connect to client");
             master_socket
-                .send(&[ServerMsgs::Greeting as u8])
+                .send(&serde_json::to_vec(&ClientMsgs::Greeting).unwrap())
                 .expect("Unable to send greeting to client");
         }
 
@@ -229,45 +225,34 @@ async fn main() -> Result<()> {
         debug!("Starting thread {}", thr_id);
         let handle = tokio::spawn(async move {
             debug!("Thread {} functional", thr_id);
-            let thr_target = &format!("thread {}", thr_id);
             loop {
-                let (_, addr) = master_socket
-                    .recv_from(&mut hbuf)
+                let (bytes, addr) = master_socket
+                    .recv_from(&mut buf)
                     .expect("Unable to receive data from master socket");
 
-                match FromPrimitive::from_u8(hbuf[0]).unwrap_or_else(|| {
-                    let bytes = master_socket.recv(&mut sbuf).unwrap_or(0);
-                    panic!(
-                        "Wrong client packet header: {}, possible server/client version mismatch. {}b of pending socket contents are:\n\
-                        {:#?}\n\
-                        -----EOM-----",
-                        hbuf[0],
-                        bytes,
-                        &sbuf[0..bytes]
-                    )
-                }) {
+                match serde_json::from_slice(&buf[..bytes]).expect("Unable to parse client message") {
                     ClientMsgs::BatchRequest => {
                         debug!(
                             "got BatchRequest from socket {}",
                             addr.as_pathname().unwrap().to_str().unwrap()
                         );
                         match batches.lock().unwrap().next() {
-                            Some(x) => {
-                                master_socket
-                                    .send(&[ServerMsgs::Batch as u8])
-                                    .expect(&format!("Unable to send batch header to thread {}", thr_id));
+                            Some(batch) => {
+                                let batch = &serde_json::to_string(&ClientMsgs::Batch(batch.to_vec())).unwrap();
 
-                                let batch_ser = x.join("\n");
-                                debug!("Sending to client: \n{}\n---EOM---", batch_ser);
-                                let batch_ser = batch_ser.as_bytes();
+                                debug!(
+                                    "Sending {} to {}",
+                                    batch,
+                                    addr.as_pathname().unwrap().to_str().unwrap()
+                                );
                                 master_socket
-                                    .send(batch_ser)
+                                    .send(&batch.as_bytes())
                                     .expect(&format!("Unable to send batch to thread {}", thr_id));
                             }
                             None => {
                                 debug!("No batches left, sending EndRequest to thread {}", thr_id);
                                 master_socket
-                                    .send(&[ServerMsgs::EndRequest as u8])
+                                    .send(&serde_json::to_vec(&ClientMsgs::EndRequest).unwrap())
                                     .expect(&format!(
                                         "Unable to send EndRequest header to thread {}",
                                         thr_id
@@ -276,63 +261,38 @@ async fn main() -> Result<()> {
                             }
                         };
                     }
-                    ClientMsgs::Greeting => {
-                        unimplemented!(
-                            "Unexpected greeting recieved from socket {}",
-                            addr.as_pathname().unwrap().to_str().unwrap()
-                        )
-                    }
-                    ClientMsgs::Log => {
+                    ClientMsgs::Log {
+                        thr_id: _,
+                        level,
+                        target,
+                        msg,
+                    } => {
                         debug!(
                             "got Log message from socket {}",
                             addr.as_pathname().unwrap().to_str().unwrap()
                         );
 
-                        let mut lbuf = [0; 5];
-                        let b = master_socket.recv(&mut lbuf).expect(&format!(
-                            "Unable to recieve log message from thread {}",
-                            thr_id
-                        ));
-
-                        let l = log::Level::from_str(std::str::from_utf8(&lbuf[..b]).expect(&format!("Invalid UTF-8 in thread {}", thr_id))).expect(
-                            &format!(
-                                "Unable to parse \"{}\" as log level from thread {}",
-                                std::str::from_utf8(&lbuf).unwrap(),
-                                thr_id
-                            ),
-                        );
-
-                        let mut len = [0; size_of::<usize>()];
-
-                        master_socket
-                            .recv(&mut len)
-                            .expect("Unable to receive log message length from thread");
-
-                        let mut msg = vec![0; usize::from_ne_bytes(len)];
-
-                        let b = master_socket
-                            .recv(&mut msg)
-                            .expect("Unable to receive log message from thread");
-                        log!(target: thr_target, l, "{}", std::str::from_utf8(&msg[..b]).expect("Unable to parse log message from thread"));
+                        log!(target: &target, level, "{}", msg);
                     }
-                    ClientMsgs::JSON => {
+                    ClientMsgs::JSON(msg) => {
                         debug!(
                             "got JSON from socket {}",
                             addr.as_pathname().unwrap().to_str().unwrap()
                         );
-                        let mut len = [0; size_of::<usize>()];
-                        master_socket
-                            .recv(&mut len)
-                            .expect("Unable to receive log message length from thread");
 
-                        let mut msg = vec![0; usize::from_ne_bytes(len)];
-                        let b = master_socket
-                            .recv(&mut msg)
-                            .expect("Unable to receive log message from thread");
-                        let json: DownloadStatus = serde_json::from_slice(&msg[..b]).unwrap_or_else(|e| {
-                            std::fs::write("/home/mango/programming/rhytm/test_output/fucked.json", &msg[..b]).unwrap();
-                            error!("Parse failed @ {}:{}, message is {}", e.line(), e.column(), e);
-                            error!("Context: {}", std::str::from_utf8(&msg[e.column()-20..e.column()+20]).unwrap());
+                        let json: DownloadStatus = serde_json::from_str(&msg).unwrap_or_else(|e| {
+                            std::fs::write(
+                                "/home/mango/programming/rhytm/test_output/fucked.json",
+                                &msg,
+                            )
+                            .unwrap();
+                            error!(
+                                "Parse failed @ {}:{}, message is {}",
+                                e.line(),
+                                e.column(),
+                                e
+                            );
+                            error!("Context: {}", &msg[e.column() - 20..e.column() + 20]);
                             error!("                           ^");
                             error!("                           \\-- Error is here");
                             panic!("Fucking json")
@@ -351,6 +311,24 @@ async fn main() -> Result<()> {
                         //TODO: get the json model from wherever and parse it like that instead of stupid "Value" parsing
 
                         //TODO! parse the fucking JSON, *insert approximately six hours of selfharm*
+                    }
+                    ClientMsgs::EndRequest => {
+                        unimplemented!(
+                            "Unexpected EndRequest recieved from socket {}",
+                            addr.as_pathname().unwrap().to_str().unwrap()
+                        )
+                    }
+                    ClientMsgs::Batch(_) => {
+                        unimplemented!(
+                            "Unexpected Batch recieved from socket {}",
+                            addr.as_pathname().unwrap().to_str().unwrap()
+                        )
+                    }
+                    ClientMsgs::Greeting => {
+                        unimplemented!(
+                            "Unexpected Greeting recieved from socket {}",
+                            addr.as_pathname().unwrap().to_str().unwrap()
+                        )
                     }
                 }
             }
