@@ -1,16 +1,13 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
-    videos (pk) {
-        pk -> Integer,
-        uid -> Nullable<Text>,
+    videos (id) {
+        id -> BigInt,
+        uid -> Text,
         link -> Nullable<Text>,
         title -> Nullable<Text>,
         author -> Nullable<Text>,
-        duration -> Nullable<Integer>,
+        duration -> Nullable<BigInt>,
         description -> Nullable<Text>,
-        thumbnail_path -> Nullable<Text>,
-        date -> Nullable<Integer>,
-        other -> Nullable<Binary>,
     }
 }

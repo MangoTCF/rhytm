@@ -1,9 +1,9 @@
-#[path = "../udde.rs"]
-mod udde;
+#[path = "../comms.rs"]
+mod comms;
 use core::result::Result::Ok;
 
+use comms::{Message, MessageRead, MessageWrite};
 use log::Level;
-use udde::{Message, MessageRead, MessageWrite};
 
 use anyhow::Result;
 

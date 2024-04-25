@@ -1,6 +1,6 @@
 -- Your SQL goes here
 CREATE TABLE "videos" (
-    "pk" INTEGER PRIMARY KEY ASC AUTOINCREMENT NOT NULL,
+    "id" INTEGER PRIMARY KEY ASC AUTOINCREMENT NOT NULL,
     "uid" VARCHAR(11),
     "link" VARCHAR(127),
     "title" VARCHAR(255),

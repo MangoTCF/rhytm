@@ -1,4 +1,4 @@
-use std::{io::Read, io::Write, os::unix::net::UnixStream, vec};
+use std::{io::Read, io::Write, os::unix::net::UnixStream};
 
 use anyhow::{Context, Error, Ok};
 use serde::{Deserialize, Serialize};
