@@ -3,18 +3,16 @@ mod udde;
 
 use std::{
     env,
+    fmt::format,
     fs::{self, Permissions},
-    io::ErrorKind,
-    os::unix::fs::PermissionsExt,
+    io::{ErrorKind, Read, Write},
+    os::unix::{fs::PermissionsExt, net::UnixListener},
     process::Command,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use clap::Parser;
 use diesel::{sqlite, Connection};
-
-use std::os::unix::net::UnixDatagram;
 
 use anyhow::{Context, Result};
 use core::result::Result::Ok;
@@ -26,7 +24,7 @@ use log::{debug, info, log, warn, LevelFilter};
 use regex::Regex;
 use simplelog::{error, CombinedLogger, Config, TermLogger, TerminalMode};
 
-use crate::udde::{ClientMsgs, DownloadStatus};
+use crate::udde::{DownloadStatus, Message, MessageRead, MessageWrite};
 
 const THREAD_COUNT: usize = 1;
 const LINK_BATCH_SIZE: usize = 5;
@@ -128,16 +126,16 @@ async fn main() -> Result<()> {
     }
 
     // Ensure that all directories exist
-    match std::fs::create_dir(options.download_dir.clone()).err() {
-        Some(err) => {
+    match std::fs::create_dir(options.download_dir.clone()) {
+        Err(err) => {
             if err.kind() != ErrorKind::AlreadyExists {
                 panic!("Unable to create {}: {}", options.download_dir, err);
             }
         }
-        None => {}
+        Ok(_) => {}
     }
-    match std::fs::create_dir(options.download_dir.to_owned() + &options.logs_dir_relative).err() {
-        Some(err) => {
+    match std::fs::create_dir(options.download_dir.to_owned() + &options.logs_dir_relative) {
+        Err(err) => {
             if err.kind() != ErrorKind::AlreadyExists {
                 panic!(
                     "Unable to create {}{}: {}",
@@ -145,26 +143,35 @@ async fn main() -> Result<()> {
                 );
             }
         }
-        None => {}
+        Ok(_) => {}
     };
-    match std::fs::create_dir(options.tmp_dir.clone()).err() {
-        Some(err) => {
+    match std::fs::create_dir(options.tmp_dir.clone()) {
+        Err(err) => {
             if err.kind() != ErrorKind::AlreadyExists {
                 panic!("Unable to create {}: {}", options.tmp_dir, err);
             }
         }
-        None => {}
+        Ok(_) => {}
     };
+    match std::fs::remove_file(options.tmp_dir.clone() + "/master.sock") {
+        Err(err) => {
+            if err.kind() != ErrorKind::AlreadyExists {
+                panic!(
+                    "Unable to create {}: {}",
+                    options.tmp_dir.clone() + "/master.sock",
+                    err
+                );
+            }
+        }
+        Ok(_) => {}
+    }
+
+    let listener = UnixListener::bind(options.tmp_dir.clone() + "/master.sock")?;
 
     let mut handles = Vec::<(JoinHandle<_>, usize)>::with_capacity(THREAD_COUNT);
 
     for thr_id in 0..options.threads {
-        let mut buf = Vec::<u8>::new();
-        buf.resize(131072, 0);
-        debug!("{}", buf.capacity());
-        let batches = Arc::clone(&batches);
-        let msp = &format!("{}/{}/master.sock", options.tmp_dir, thr_id);
-        let csp = &format!("{}/{}/client.sock", options.tmp_dir, thr_id);
+        let msp = options.tmp_dir.clone() + "/master.sock";
 
         match std::fs::create_dir(options.tmp_dir.to_string() + "/" + &thr_id.to_string()) {
             Err(err) => {
@@ -174,174 +181,144 @@ async fn main() -> Result<()> {
             }
             Ok(_) => {}
         };
-        match std::fs::remove_file(msp) {
-            Err(err) => {
-                if err.kind() != ErrorKind::NotFound {
-                    panic!("Unable to remove old socket @ {}: {}", msp, err);
-                }
-            }
-            Ok(_) => {}
-        };
-        match std::fs::remove_file(csp) {
-            Err(err) => {
-                if err.kind() != ErrorKind::NotFound {
-                    panic!("Unable to remove old socket @ {}: {}", csp, err);
-                }
-            }
-            Ok(_) => {}
-        };
-
-        let master_socket = UnixDatagram::bind(msp).expect(&format!("Unable to create socket @ {}", msp));
 
         // Spawn child
         //TODO: move from args to env
         let _client = Command::new(thread_path.clone())
-            .arg(csp)
+            .arg("csp was here")
             .arg(msp)
             .arg(thr_id.to_string())
             .spawn()
             .with_context(|| format!("Unable to spawn thread {}", thr_id))?;
-
-        let to = master_socket.read_timeout()?;
-        master_socket.set_read_timeout(Some(Duration::from_millis(5000)))?;
-
-        let bytes = master_socket
-            .recv(&mut buf)
-            .expect("Unable to recieve greeting from client");
-        master_socket.set_read_timeout(to)?;
-        if serde_json::from_slice::<ClientMsgs>(&buf[..bytes]).unwrap() == ClientMsgs::Greeting {
-            debug!("Recved greeting from client");
-            master_socket
-                .connect(csp)
-                .expect("Unable to connect to client");
-            master_socket
-                .send(&serde_json::to_vec(&ClientMsgs::Greeting).unwrap())
-                .expect("Unable to send greeting to client");
-        }
-
-        /*------------------//
-        \\Tokio handler loop\\
-        //------------------*/
-        debug!("Starting thread {}", thr_id);
-        let handle = tokio::spawn(async move {
-            debug!("Thread {} functional", thr_id);
-            loop {
-                let (bytes, addr) = master_socket
-                    .recv_from(&mut buf)
-                    .expect("Unable to receive data from master socket");
-
-                match serde_json::from_slice(&buf[..bytes]).expect("Unable to parse client message") {
-                    ClientMsgs::BatchRequest => {
-                        debug!(
-                            "got BatchRequest from socket {}",
-                            addr.as_pathname().unwrap().to_str().unwrap()
-                        );
-                        match batches.lock().unwrap().next() {
-                            Some(batch) => {
-                                let batch = &serde_json::to_string(&ClientMsgs::Batch(batch.to_vec())).unwrap();
-
-                                debug!(
-                                    "Sending {} to {}",
-                                    batch,
-                                    addr.as_pathname().unwrap().to_str().unwrap()
-                                );
-                                master_socket
-                                    .send(&batch.as_bytes())
-                                    .expect(&format!("Unable to send batch to thread {}", thr_id));
-                            }
-                            None => {
-                                debug!("No batches left, sending EndRequest to thread {}", thr_id);
-                                master_socket
-                                    .send(&serde_json::to_vec(&ClientMsgs::EndRequest).unwrap())
-                                    .expect(&format!(
-                                        "Unable to send EndRequest header to thread {}",
-                                        thr_id
-                                    ));
-                                return;
-                            }
-                        };
-                    }
-                    ClientMsgs::Log {
-                        thr_id: _,
-                        level,
-                        target,
-                        msg,
-                    } => {
-                        debug!(
-                            "got Log message from socket {}",
-                            addr.as_pathname().unwrap().to_str().unwrap()
-                        );
-
-                        log!(target: &target, level, "{}", msg);
-                    }
-                    ClientMsgs::JSON(msg) => {
-                        debug!(
-                            "got JSON from socket {}",
-                            addr.as_pathname().unwrap().to_str().unwrap()
-                        );
-
-                        let json: DownloadStatus = serde_json::from_str(&msg).unwrap_or_else(|e| {
-                            std::fs::write(
-                                "/home/mango/programming/rhytm/test_output/fucked.json",
-                                &msg,
-                            )
-                            .unwrap();
-                            error!(
-                                "Parse failed @ {}:{}, message is {}",
-                                e.line(),
-                                e.column(),
-                                e
-                            );
-                            error!("Context: {}", &msg[e.column() - 20..e.column() + 20]);
-                            error!("                           ^");
-                            error!("                           \\-- Error is here");
-                            panic!("Fucking json")
-                        });
-
-                        if json.status == "finished" {
-                            std::fs::write(
-                                format!(
-                                    "/home/mango/programming/rhytm/test_output/{}.json",
-                                    json.filename.replace("/", "_")
-                                ),
-                                &serde_json::to_string_pretty(&json).unwrap(),
-                            )
-                            .expect("Unable to write json");
-                        }
-                        //TODO: get the json model from wherever and parse it like that instead of stupid "Value" parsing
-
-                        //TODO! parse the fucking JSON, *insert approximately six hours of selfharm*
-                    }
-                    ClientMsgs::EndRequest => {
-                        unimplemented!(
-                            "Unexpected EndRequest recieved from socket {}",
-                            addr.as_pathname().unwrap().to_str().unwrap()
-                        )
-                    }
-                    ClientMsgs::Batch(_) => {
-                        unimplemented!(
-                            "Unexpected Batch recieved from socket {}",
-                            addr.as_pathname().unwrap().to_str().unwrap()
-                        )
-                    }
-                    ClientMsgs::Greeting => {
-                        unimplemented!(
-                            "Unexpected Greeting recieved from socket {}",
-                            addr.as_pathname().unwrap().to_str().unwrap()
-                        )
-                    }
-                }
-            }
-        });
-        handles.push((handle, thr_id));
-        info!("Spawned thread {}", 0);
     }
+    //now we should have all our threads running and we should try to accept the conns
+
+    for stream in listener.incoming() {
+        match stream {
+            Ok(mut stream) => {
+                let batches = Arc::clone(&batches);
+                let msg = stream.read_json_msg::<Message>().unwrap();
+
+                if msg != Message::Greeting(0) {
+                    error!("Received non-greeting message from client: {:?}", msg);
+                    panic!("Client sent garbage");
+                }
+
+                let mut thr_id: usize = 0;
+                if let Message::Greeting(v) = msg {
+                    thr_id = v;
+                } else {
+                    panic!("How the fuck are we getting here?");
+                }
+
+                stream.write_json_msg(&msg).unwrap();
+
+                let handle = tokio::spawn(async move {
+                    debug!("Thread {:?} functional", thr_id);
+                    loop {
+                        match stream.read_json_msg::<Message>().unwrap() {
+                            // Batch request
+                            Message::BatchRequest => {
+                                debug!("got BatchRequest from socket {:?}", thr_id);
+                                match batches.lock().unwrap().next() {
+                                    Some(batch) => {
+                                        let batch = &Message::Batch(batch.to_vec());
+
+                                        debug!("Sending Batch({:?}) to thread {:?}", batch, thr_id);
+                                        stream
+                                            .write_json_msg(&batch)
+                                            .with_context(|| format!("Unable to send Batch to thread {}", thr_id))
+                                            .unwrap();
+                                    }
+                                    None => {
+                                        debug!("No batches left, sending EndRequest to thread {:?}", thr_id);
+                                        stream
+                                            .write_json_msg(&Message::EndRequest)
+                                            .expect(&format!("Unable to send EndRequest to thread {:?}", thr_id));
+                                        return;
+                                    }
+                                };
+                            }
+
+                            // Log
+                            Message::Log {
+                                thr_id: _,
+                                level,
+                                target,
+                                msg,
+                            } => {
+                                debug!("got Log message from socket {:?}", thr_id);
+
+                                log!(target: &target, level, "{}", msg);
+                            }
+
+                            // JSON
+                            Message::JSON(msg) => {
+                                debug!("got JSON from socket {:?}", thr_id);
+
+                                let json: DownloadStatus = serde_json::from_str(&msg).unwrap_or_else(|e| {
+                                    std::fs::write(
+                                        "/home/mango/programming/rhytm/test_output/fucked.json",
+                                        &msg,
+                                    )
+                                    .unwrap();
+                                    error!(
+                                        "Parse failed @ {}:{}, message is {}",
+                                        e.line(),
+                                        e.column(),
+                                        e
+                                    );
+                                    error!("Context: {}", &msg[e.column() - 20..e.column() + 20]);
+                                    error!("                           ^");
+                                    error!("                           \\-- Error is here");
+                                    panic!("Fucking json")
+                                });
+
+                                if json.status == "finished" {
+                                    std::fs::write(
+                                        format!(
+                                            "/home/mango/programming/rhytm/test_output/{}.json",
+                                            json.filename.replace("/", "_")
+                                        ),
+                                        &serde_json::to_string_pretty(&json).unwrap(),
+                                    )
+                                    .expect("Unable to write json");
+                                }
+                                //TODO: get the json model from wherever and parse it like that instead of stupid "Value" parsing
+
+                                //TODO! parse the fucking JSON, *insert approximately six hours of selfharm*
+                            }
+                            Message::EndRequest => {
+                                unimplemented!("Unexpected EndRequest recieved from socket {:?}", thr_id)
+                            }
+                            Message::Batch(_) => {
+                                unimplemented!("Unexpected Batch recieved from socket {:?}", thr_id)
+                            }
+                            Message::Greeting(_) => {
+                                unimplemented!("Unexpected Greeting recieved from socket {:?}", thr_id)
+                            }
+                        }
+                    }
+                });
+                handles.push((handle, thr_id));
+                info!("Spawned thread {}", 0);
+            }
+            Err(_) => todo!(),
+        }
+    }
+    // {
+    //     /*------------------//
+    //     \\Tokio handler loop\\
+    //     //------------------*/
+    //     debug!("Starting thread {}", thr_id);
+    //     let handle =
+    // }
 
     for handle in handles {
         match handle.0.await {
             Ok(_) => {}
             Err(e) => {
-                warn!("Thread {} failed to finish: {}", handle.1, e)
+                warn!("Thread {:?} failed to finish: {}", handle.1, e)
             }
         };
     }

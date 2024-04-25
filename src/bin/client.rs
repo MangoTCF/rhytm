@@ -3,19 +3,19 @@ mod udde;
 use core::result::Result::Ok;
 
 use log::Level;
-use udde::ClientMsgs;
+use udde::{Message, MessageRead, MessageWrite};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use pyo3::{
     pyclass, pymethods,
-    types::{IntoPyDict, PyModule, PyString},
-    IntoPy, Python,
+    types::{IntoPyDict, PyAnyMethods, PyModule, PyString, PyStringMethods},
+    Bound, IntoPy, Python,
 };
 
-use std::os::unix::net::UnixDatagram;
+use std::env;
+use std::os::unix::net::UnixStream;
 use std::process::exit;
-use std::{env, time::Duration};
 
 /**
  * Print usage information and exit.
@@ -31,13 +31,13 @@ fn usage(selfpath: String) {
 #[derive(Debug)]
 struct Callback {
     #[allow(dead_code)] // callback_function is called from Python
-    callback_function: fn(&PyString, UnixDatagram),
-    ud: UnixDatagram,
+    callback_function: fn(&Bound<PyString>, UnixStream),
+    ud: UnixStream,
 }
 
 #[pymethods]
 impl Callback {
-    fn __call__(&self, d: &PyString) -> () {
+    fn __call__(&self, d: &Bound<PyString>) -> () {
         let _ = (self.callback_function)(
             d,
             self.ud
@@ -49,7 +49,8 @@ impl Callback {
 
 /**
  * TODO: Make an init function and put all redundant code there
- * TODO: implement, accepts a self socket path, master socket path and thread id(?) as stdin args, starts download through yt_dlp, injecting callback into hooks, which communicates with master thread to update progress bars via FIFO
+ * TODO: implement, accepts a self socket path, master socket path and thread id(?) as stdin args,
+ * starts download through yt_dlp, injecting callback into hooks, which communicates with master thread to update progress bars via FIFO
  */
 fn main() -> Result<()> {
     let args = env::args().collect::<Vec<_>>();
@@ -58,96 +59,78 @@ fn main() -> Result<()> {
         exit(1);
     }
 
-    let socket = UnixDatagram::bind(args[1].clone()).expect(&format!("Unable to bind to socket @ {}", args[1].clone()));
+    let mut socket = UnixStream::connect(args[2].clone()).expect(&format!("Unable to bind to socket @ {}", args[1].clone()));
 
     socket
-        .connect(args[2].clone())
-        .expect("Unable to connect to master socket");
-    println!(
-        "Sending {:?}",
-        &serde_json::to_vec(&ClientMsgs::Greeting).unwrap()
-    );
-    socket
-        .send(&serde_json::to_vec(&ClientMsgs::Greeting).unwrap())
+        .write_json_msg(&Message::Greeting(
+            args[3].clone().parse::<usize>().unwrap(),
+        ))
         .unwrap();
-    socket
-        .set_write_timeout(Some(Duration::from_millis(5000)))
-        .expect("Unable to set socket timeout");
 
-    let mut buf = Vec::<u8>::with_capacity(2048);
-    buf.resize(2048, 0);
-    let bytes = socket.recv(&mut buf).expect("Unable to recieve greeting");
-    socket
-        .set_write_timeout(None)
-        .expect("Unable to reset socket timeout");
+    let msg = socket.read_json_msg::<Message>().unwrap();
 
-    if serde_json::from_slice::<ClientMsgs>(&buf[..bytes]).unwrap() != ClientMsgs::Greeting {
-        unimplemented!(
-            "Wrong greeting received, {:?} instead of {:?}",
-            std::str::from_utf8(&buf[..bytes]).unwrap(),
-            serde_json::to_string(&ClientMsgs::Greeting)
-        );
+    if msg != Message::Greeting(0) {
+        print!("Received non-greeting message from server: {:?}", msg);
+        panic!("Client sent garbage");
+    }
+
+    if let Message::Greeting(v) = msg {
+        if args[3].clone().parse::<usize>().unwrap() != v {
+            panic!("Server sent greeting with wrong id");
+        }
+    } else {
+        panic!("How the fuck are we getting here?");
     }
 
     pyo3::prepare_freethreaded_python();
     //TODO: Move redundant init code here
 
     loop {
-        socket.send(&serde_json::to_vec(&ClientMsgs::BatchRequest).unwrap())?;
-        let bytes = socket.recv(&mut buf).unwrap();
-        match serde_json::from_slice::<ClientMsgs>(&buf[..bytes]).unwrap() {
-            ClientMsgs::Greeting => {
+        socket.write_json_msg(&Message::BatchRequest).unwrap();
+        match socket.read_json_msg::<Message>().unwrap() {
+            Message::Greeting(_) => {
                 unimplemented!("Wrong batch header, Greeting instead of Batch possible server/client version mismatch")
             }
-            ClientMsgs::Batch(batch) => {
+            Message::Batch(batch) => {
                 for link in batch {
                     Python::with_gil(|py| {
                         //Override stdout to disable _all_ output from Python code
-                        let sys = py.import("sys").expect("Python: Unable to import sys");
+                        let sys = py
+                            .import_bound("sys")
+                            .expect("Python: Unable to import sys");
                         sys.setattr(
                             "stdout",
-                            py.eval("open(\"/dev/null\", \"w\")", Option::None, Option::None)
+                            py.eval_bound("open(\"/dev/null\", \"w\")", Option::None, Option::None)
                                 .expect("Python: Unable to open /dev/null"),
                         )
                         .expect("Python: Unable to set stdout to /dev/null");
                         sys.setattr(
                             "stderr",
-                            py.eval("open(\"/dev/null\", \"w\")", Option::None, Option::None)
+                            py.eval_bound("open(\"/dev/null\", \"w\")", Option::None, Option::None)
                                 .expect("Python: Unable to open /dev/null"),
                         )
                         .expect("Python: Unable to set stderr to /dev/null");
                         let callback = Callback {
-                            callback_function: |d, ud| {
-                                ud.send(
-                                    &serde_json::to_vec(&ClientMsgs::Log {
-                                        thr_id: env::args().collect::<Vec<String>>()[3]
-                                            .trim()
-                                            .parse()
-                                            .unwrap(),
-                                        level: Level::Debug,
-                                        target: "Thread".to_string(),
-                                        msg: "Sending JSON!".to_string(),
-                                    })
-                                    .unwrap(),
-                                )
+                            callback_function: |d, mut ud| {
+                                ud.write_json_msg(&Message::Log {
+                                    thr_id: env::args().collect::<Vec<String>>()[3]
+                                        .trim()
+                                        .parse()
+                                        .unwrap(),
+                                    level: Level::Debug,
+                                    target: "Thread".to_string(),
+                                    msg: "Sending JSON!".to_string(),
+                                })
                                 .unwrap();
-                                ud.send(&serde_json::to_vec(&ClientMsgs::JSON(d.to_string())).unwrap())
-                                    .unwrap();
 
-                                ud.send(&[udde::ClientMsgs::JSON as u8])
-                                    .expect("Callback: Unable to send JSON header");
                                 let str = d.to_str().expect("Callback: Unable to parse json string");
                                 std::fs::write(
                                     "/home/mango/programming/rhytm/thr0.log",
                                     str.len().to_string().as_bytes(),
                                 )
                                 .unwrap();
-                                ud.send(&str.len().to_ne_bytes())
-                                    .expect("Callback: Unable to send JSON length");
-                                match ud
-                                    .send(str.as_bytes())
-                                    .with_context(|| format!("length is {}", str.len()))
-                                {
+
+                                match ud.write_json_msg(&Message::JSON(str.to_string())) {
                                     Ok(_) => {}
                                     Err(e) => {
                                         std::fs::write(
@@ -166,7 +149,7 @@ fn main() -> Result<()> {
 
                         //Function for preprocessing JSON dictionary before sending it to Rust
                         //I know that this is fucked up but I am unable to figure out a better solution
-                        let callback_preprocess = PyModule::from_code(
+                        let callback_preprocess = PyModule::from_code_bound(
                             py,
                             "\n\
                     import json\n\
@@ -190,7 +173,7 @@ fn main() -> Result<()> {
                                 Option::<&str>::None,
                             ),
                         )]
-                        .into_py_dict(py);
+                        .into_py_dict_bound(py);
 
                         params
                             .set_item("verbose", false)
@@ -216,38 +199,36 @@ fn main() -> Result<()> {
                             .set_item("simulate", false)
                             .expect("Python: Unable to set simulate in yt-dlp params");
 
-                        let args = vec![("params", params)].into_py_dict(py);
+                        let args = vec![("params", params)].into_py_dict_bound(py);
 
                         let youtube_dl = py
-                            .import("yt_dlp")
+                            .import_bound("yt_dlp")
                             .expect("Failed to import yt_dlp")
-                            .call_method("YoutubeDL", (), Some(args))
+                            .call_method("YoutubeDL", (), Some(&args))
                             .expect("Python: Unable to create YoutubeDL object");
 
                         let _ = youtube_dl.call_method1("download", (link.clone(),));
                     });
+
                     socket
-                        .send(
-                            &serde_json::to_vec(&ClientMsgs::Log {
-                                thr_id: env::args().collect::<Vec<String>>()[3]
-                                    .trim()
-                                    .parse()
-                                    .unwrap(),
-                                level: Level::Info,
-                                target: "Thread".to_string(),
-                                msg: format!("finished downloading video ID {}", link),
-                            })
-                            .unwrap(),
-                        )
+                        .write_json_msg(&Message::Log {
+                            thr_id: env::args().collect::<Vec<String>>()[3]
+                                .trim()
+                                .parse()
+                                .unwrap(),
+                            level: Level::Info,
+                            target: "Thread".to_string(),
+                            msg: format!("finished downloading video ID {}", link),
+                        })
                         .unwrap();
                 }
             }
-            ClientMsgs::EndRequest => {
+            Message::EndRequest => {
                 break;
             }
-            ClientMsgs::Log { .. } => unimplemented!("Wrong batch header, Log instead of Batch possible server/client version mismatch"),
-            ClientMsgs::BatchRequest => unimplemented!("Wrong batch header, BatchRequest instead of Batch possible server/client version mismatch"),
-            ClientMsgs::JSON(_) => unimplemented!("Wrong batch header, JSON instead of Batch possible server/client version mismatch"),
+            Message::Log { .. } => unimplemented!("Wrong batch header, Log instead of Batch, possible server/client version mismatch"),
+            Message::BatchRequest => unimplemented!("Wrong batch header, BatchRequest instead of Batch, possible server/client version mismatch"),
+            Message::JSON(_) => unimplemented!("Wrong batch header, JSON instead of Batch, possible server/client version mismatch"),
         }
     }
 

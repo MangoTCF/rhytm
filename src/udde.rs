@@ -1,9 +1,48 @@
+use std::{io::Read, io::Write, os::unix::net::UnixStream, vec};
+
+use anyhow::{Context, Error, Ok};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+pub trait MessageRead: std::io::Read {
+    fn read_json_msg<T: for<'a> Deserialize<'a>>(&mut self) -> Result<T, Error>;
+}
+
+impl MessageRead for UnixStream {
+    fn read_json_msg<T: for<'a> Deserialize<'a>>(&mut self) -> Result<T, Error> {
+        let mut lbuf = [0 as u8; std::mem::size_of::<usize>()];
+        self.read_exact(&mut lbuf)
+            .context("Unable to read msg length")?;
+
+        let size = usize::from_ne_bytes(lbuf.try_into().unwrap());
+
+        let mut buf = Vec::with_capacity(size);
+        buf.resize(size, 0);
+        self.read_exact(&mut buf)
+            .context("Unable to read message")?;
+        serde_json::from_slice(&buf).context("Unable to deserialize")
+    }
+}
+
+pub trait MessageWrite: std::io::Write {
+    fn write_json_msg<T: Serialize>(&mut self, msg: &T) -> Result<usize, Error>;
+}
+
+impl MessageWrite for UnixStream {
+    fn write_json_msg<T: Serialize>(&mut self, msg: &T) -> Result<usize, Error> {
+        let msg = serde_json::to_vec(msg).context("Unable to serialize")?;
+        let size = msg.len();
+
+        self.write_all(&size.to_ne_bytes())
+            .context("Unable to write msg length")?;
+        self.write_all(&msg).context("Unable to write message")?;
+        Ok(size)
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ClientMsgs {
-    Greeting,
+pub enum Message {
+    Greeting(usize),
     Log {
         thr_id: usize,
         level: log::Level,
@@ -153,14 +192,14 @@ pub struct InfoDict {
     pub height: Option<usize>,
     pub width: Option<usize>,
     pub _filename: String,
-    pub album: String,
-    pub artist: String,
+    pub album: Option<String>,
+    pub artist: Option<String>,
     pub acodec: String,
-    pub alt_title: String,
+    pub alt_title: Option<String>,
     pub audio_ext: String,
     pub availability: String,
     pub channel: String,
-    pub creator: String,
+    pub creator: Option<String>,
     pub chapters: Option<String>,
     pub container: String,
     pub channel_id: String,
@@ -188,7 +227,7 @@ pub struct InfoDict {
     pub release_year: Option<u32>,
     pub requested_subtitles: Option<String>,
     pub title: String,
-    pub track: String,
+    pub track: Option<String>,
     pub url: String,
     pub uploader: String,
     pub uploader_id: Option<String>,
