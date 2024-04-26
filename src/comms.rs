@@ -1,6 +1,8 @@
 use std::{io::Read, io::Write, os::unix::net::UnixStream};
 
 use anyhow::{Context, Error, Ok};
+use clap::Parser;
+use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -38,6 +40,34 @@ impl MessageWrite for UnixStream {
         self.write_all(&msg).context("Unable to write message")?;
         Ok(size)
     }
+}
+
+#[derive(Parser, Debug, Serialize, Deserialize)]
+#[command(version, author, about, long_about = None)]
+struct Options {
+    #[arg(short, long, default_value = "info")]
+    verbosity: LevelFilter,
+
+    #[arg(short='j', long, default_value_t = THREAD_COUNT)]
+    threads: usize,
+
+    #[arg(short='b', long, default_value_t = LINK_BATCH_SIZE)]
+    link_batch_size: usize,
+
+    #[arg(short, long, default_value = TMP_DIR)]
+    tmp_dir: String,
+
+    #[arg(short, long, default_value = DOWNLOAD_DIR)]
+    download_dir: String,
+
+    #[arg(short, long, default_value = LOGS_DIR_RELATIVE)]
+    logs_dir_relative: String,
+
+    #[arg(short, long, default_value = PARSE_REGEX_STR)]
+    parse_regex_str: String,
+
+    #[arg(required(true))]
+    html_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -249,8 +279,8 @@ pub struct InfoDict {
     pub thumbnail: Option<String>,
     pub downloader_options: Map<String, Value>,
     pub _format_sort_fields: Option<Vec<String>>,
-    pub artists: Vec<String>,
-    pub creators: Vec<String>,
+    pub artists: Option<Vec<String>>,
+    pub creators: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

@@ -30,38 +30,10 @@ use crate::models::NewVideo;
 const THREAD_COUNT: usize = 1;
 const LINK_BATCH_SIZE: usize = 5;
 const TMP_DIR: &str = "/tmp/rhytm"; // TODO: parse from args
-const DOWNLOAD_DIR: &str = "/home/mango/Radio/"; // TODO: parse from args
+const DOWNLOAD_DIR: &str = "./test_music"; // TODO: parse from args
 const LOGS_DIR_RELATIVE: &str = "/logs/";
 const PARSE_REGEX_STR: &str = r"(https://(music)|(www)\.youtube\.com/)?(watch\?v=)([a-zA-Z0-9/\.\?=\-_]+)";
 pub const EMBEDDED_MIGRATIONS: EmbeddedMigrations = embed_migrations!();
-
-#[derive(Parser, Debug)]
-#[command(version, author, about, long_about = None)]
-struct Options {
-    #[arg(short, long, default_value = "info")]
-    verbosity: LevelFilter,
-
-    #[arg(short='j', long, default_value_t = THREAD_COUNT)]
-    threads: usize,
-
-    #[arg(short='b', long, default_value_t = LINK_BATCH_SIZE)]
-    link_batch_size: usize,
-
-    #[arg(short, long, default_value = TMP_DIR)]
-    tmp_dir: String,
-
-    #[arg(short, long, default_value = DOWNLOAD_DIR)]
-    download_dir: String,
-
-    #[arg(short, long, default_value = LOGS_DIR_RELATIVE)]
-    logs_dir_relative: String,
-
-    #[arg(short, long, default_value = PARSE_REGEX_STR)]
-    parse_regex_str: String,
-
-    #[arg(required(true))]
-    html_path: String,
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -88,7 +60,7 @@ async fn main() -> Result<()> {
 
     let regex = Regex::new(&options.parse_regex_str).unwrap(); //TODO?: parse this from args
 
-    let mut connection = sqlite::SqliteConnection::establish(&(options.download_dir.to_string() + "links.db")).unwrap();
+    let mut connection = sqlite::SqliteConnection::establish(&(options.download_dir.to_string() + "/links.db")).unwrap();
 
     connection
         .run_pending_migrations(EMBEDDED_MIGRATIONS)
@@ -212,9 +184,10 @@ async fn main() -> Result<()> {
         // Spawn child
         //TODO: move from args to env
         let _client = Command::new(thread_path.clone())
-            .arg("csp was here")
-            .arg(msp)
-            .arg(thr_id.to_string())
+            .env_clear()
+            .env("MSP", msp)
+            .env("THR_ID", thr_id.to_string())
+            .env("key", val)
             .spawn()
             .with_context(|| format!("Unable to spawn thread {}", thr_id))?;
     }
