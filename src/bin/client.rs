@@ -50,6 +50,7 @@ fn main() -> Result<()> {
     let log_dir = env::var("LOG_DIR").expect("LOG_DIR not set");
     let download_dir = env::var("DOWNLOAD_DIR").expect("DOWNLOAD_DIR not set");
     let tmp_dir = env::var("TMP_DIR").expect("TMP_DIR not set");
+    let yt_dlp_output_template = env::var("YT_DLP_OUTPUT_TEMPLATE").expect("YT_DLP_OUTPUT_TEMPLATE not set");
 
     let mut socket = UnixStream::connect(msp.clone()).expect(&format!("Unable to bind to socket @ {}", msp));
 
@@ -57,7 +58,7 @@ fn main() -> Result<()> {
 
     let msg = socket.read_json_msg::<Message>().unwrap();
 
-    if msg != Message::Greeting(0) {
+    if std::mem::discriminant(&msg) != std::mem::discriminant(&Message::Greeting(0)) {
         print!("Received non-greeting message from server: {:?}", msg);
         panic!("Server sent garbage");
     }
@@ -91,17 +92,6 @@ fn main() -> Result<()> {
         .expect("Python: Unable to set stderr to /dev/null");
         let callback = Callback {
             callback_function: |d, mut ud| {
-                ud.write_json_msg(&Message::Log {
-                    thr_id: env::var("THR_ID")
-                        .expect("THR_ID not set")
-                        .parse::<usize>()
-                        .unwrap(),
-                    level: Level::Debug,
-                    target: "Thread".to_string(),
-                    msg: "Sending JSON!".to_string(),
-                })
-                .unwrap();
-
                 let str = d.to_str().expect("Callback: Unable to parse json string");
 
                 ud.write_json_msg(&Message::JSON(str.to_string()))
@@ -140,29 +130,24 @@ fn main() -> Result<()> {
         )]
         .into_py_dict_bound(py);
 
-        params
-            .set_item("verbose", false)
-            .unwrap();
-        params
-            .set_item("quiet", true)
-            .unwrap();
-        params
-            .set_item("http_chunk_size", 10485760)
-            .unwrap();
-        params
-            .set_item("fragment_retries", 5)
-            .unwrap();
+        let paths = vec![("home", download_dir), ("temp", tmp_dir)].into_py_dict_bound(py);
+        let out_tmpl = vec![("default", yt_dlp_output_template)].into_py_dict_bound(py);
+
+        params.set_item("paths", paths).unwrap();
+        params.set_item("verbose", true).unwrap();
+        params.set_item("quiet", false).unwrap();
+        params.set_item("restrictfilenames", false).unwrap();
+        params.set_item("windowsfilenames", false).unwrap();
+        params.set_item("outtmpl_na_placeholder", "PLCHD").unwrap();
+        params.set_item("http_chunk_size", 10485760).unwrap();
+        params.set_item("fragment_retries", 5).unwrap();
         params
             .set_item(
                 "progress_hooks",
-                vec![callback_preprocess
-                    .getattr("preproc_hook")
-                    .unwrap()],
+                vec![callback_preprocess.getattr("preproc_hook").unwrap()],
             )
             .unwrap();
-        params
-            .set_item("simulate", false)
-            .expect("Python: Unable to set simulate in yt-dlp params");
+        params.set_item("simulate", false).unwrap();
 
         let args = vec![("params", params)].into_py_dict_bound(py);
 
@@ -180,7 +165,9 @@ fn main() -> Result<()> {
                 }
                 Message::Batch(batch) => {
                     for link in batch {
+                        socket.write_json_msg(&Message::DownloadStart).unwrap();
                         let _ = youtube_dl.call_method1("download", (link.clone(),));
+                        socket.write_json_msg(&Message::DownloadEnd).unwrap();
 
                         socket
                             .write_json_msg(&Message::Log {
@@ -198,6 +185,10 @@ fn main() -> Result<()> {
                 Message::Log { .. } => unimplemented!("Wrong batch header, Log instead of Batch, possible server/client version mismatch"),
                 Message::BatchRequest => unimplemented!("Wrong batch header, BatchRequest instead of Batch, possible server/client version mismatch"),
                 Message::JSON(_) => unimplemented!("Wrong batch header, JSON instead of Batch, possible server/client version mismatch"),
+                Message::DownloadStart => {
+                    unimplemented!("Wrong batch header, DownloadStart instead of Batch, possible server/client version mismatch")
+                }
+                Message::DownloadEnd => unimplemented!("Wrong batch header, DownloadEnd instead of Batch, possible server/client version mismatch"),
             }
         }
     });

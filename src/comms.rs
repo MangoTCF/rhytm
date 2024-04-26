@@ -9,9 +9,10 @@ use serde_json::{Map, Value};
 const THREAD_COUNT: usize = 1;
 const LINK_BATCH_SIZE: usize = 5;
 const TMP_DIR: &str = "/tmp/rhytm"; // TODO: parse from args
-const DOWNLOAD_DIR: &str = "./test_music"; // TODO: parse from args
+const DOWNLOAD_DIR: &str = "."; // TODO: parse from args
 const LOGS_DIR_RELATIVE: &str = "/logs/";
 const PARSE_REGEX_STR: &str = r"(https://(music)|(www)\.youtube\.com/)?(watch\?v=)([a-zA-Z0-9/\.\?=\-_]+)";
+const YT_DLP_OUTPUT_TEMPLATE: &str = "%(title,fulltitle)s - %(uploader)s - [%(id)s]";
 
 pub trait MessageRead: std::io::Read {
     fn read_json_msg<T: for<'a> Deserialize<'a>>(&mut self) -> Result<T, Error>;
@@ -73,6 +74,9 @@ pub struct Options {
     #[arg(short, long, default_value = PARSE_REGEX_STR)]
     pub parse_regex_str: String,
 
+    #[arg(short, long, default_value = YT_DLP_OUTPUT_TEMPLATE)]
+    pub yt_dlp_output_template: String,
+
     #[arg(required(true))]
     pub html_path: String,
 }
@@ -89,16 +93,12 @@ pub enum Message {
     BatchRequest,
     Batch(Vec<String>),
     JSON(String),
+    DownloadStart,
+    DownloadEnd,
     EndRequest,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-#[serde(deny_unknown_fields)]
-pub struct DownloaderOptions {
-    pub http_chunk_size: usize,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Fragment {
     //TODO: Perpetual update
@@ -106,7 +106,7 @@ pub struct Fragment {
     duration: f32,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Format {
     //TODO: Perpetual update
@@ -149,10 +149,10 @@ pub struct Format {
     pub language_preference: Option<i32>,
     pub dynamic_range: Option<String>,
     pub container: Option<String>,
-    pub downloader_options: Option<DownloaderOptions>,
+    pub downloader_options: Option<Map<String, Value>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Thumbnail {
     //TODO: Perpetual update
@@ -164,7 +164,7 @@ pub struct Thumbnail {
     pub resolution: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct HeatPoint {
     //TODO: Perpetual update
@@ -172,7 +172,16 @@ pub struct HeatPoint {
     end_time: f32,
     value: f32,
 }
-#[derive(Serialize, Deserialize, Debug, Default)]
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Chapter {
+    pub title: String,
+    pub start_time: f32,
+    pub end_time: f32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct InfoDict {
     //TODO: Perpetual update
@@ -185,13 +194,13 @@ pub struct InfoDict {
     pub quality: f32,
     pub stretched_ratio: Option<f32>,
     pub vbr: f32,
-    pub language_preference: i32,
+    pub language_preference: Option<i32>,
     pub preference: Option<i32>,
     pub source_preference: i32,
     pub comment_count: Option<u32>,
     pub channel_follower_count: u32,
     pub duration: u32,
-    pub like_count: u32,
+    pub like_count: Option<u32>,
     pub playlist_index: Option<u32>,
     pub epoch: u64,
     pub view_count: u64,
@@ -207,7 +216,7 @@ pub struct InfoDict {
     pub release_timestamp: Value,
     pub subtitles: Value,
     pub audio_channels: Option<usize>,
-    pub filesize: usize,
+    pub filesize: Option<usize>,
     pub filetime: Option<usize>,
     pub filesize_approx: usize,
     pub height: Option<usize>,
@@ -221,8 +230,8 @@ pub struct InfoDict {
     pub availability: String,
     pub channel: String,
     pub creator: Option<String>,
-    pub chapters: Option<String>,
-    pub container: String,
+    pub chapters: Option<Vec<Chapter>>,
+    pub container: Option<String>,
     pub channel_id: String,
     pub channel_url: String,
     pub display_id: String,
@@ -233,6 +242,7 @@ pub struct InfoDict {
     pub extractor: String,
     pub extractor_key: String,
     pub format: String,
+    pub format_index: Option<String>,
     pub filename: String,
     pub fulltitle: String,
     pub format_id: String,
@@ -268,13 +278,16 @@ pub struct InfoDict {
     pub heatmap: Option<Vec<HeatPoint>>,
     pub thumbnails: Vec<Thumbnail>,
     pub thumbnail: Option<String>,
-    pub downloader_options: Map<String, Value>,
+    pub downloader_options: Option<Map<String, Value>>,
     pub _format_sort_fields: Option<Vec<String>>,
     pub artists: Option<Vec<String>>,
     pub creators: Option<Vec<String>>,
+    pub manifest_url: Option<String>,
+    pub license: Option<String>,
+    pub location: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct DownloadStatus {
     //TODO: Perpetual update
@@ -284,8 +297,8 @@ pub struct DownloadStatus {
     pub tmpfilename: Option<String>,
     #[serde(default)]
     pub downloaded_bytes: usize,
-    pub total_bytes: usize,
-    pub total_bytes_estimate: Option<usize>,
+    pub total_bytes: Option<usize>,
+    pub total_bytes_estimate: Option<f64>,
     pub elapsed: Option<f32>,
     pub eta: Option<f32>,
     pub _eta_str: Option<String>,
@@ -302,4 +315,6 @@ pub struct DownloadStatus {
     #[serde(default)]
     pub fragment_count: usize,
     pub ctx_id: Option<usize>,
+    pub max_progress: Option<f32>,
+    pub progress_idx: Option<usize>,
 }

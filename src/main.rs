@@ -9,12 +9,13 @@ use core::result::Result::Ok;
 use diesel::{query_dsl::methods::SelectDsl, sqlite, Connection, RunQueryDsl, SelectableHelper};
 use diesel_migrations::MigrationHarness;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations};
-use indicatif::MultiProgress;
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 use indicatif_log_bridge::LogWrapper;
 use log::{debug, info, log, warn};
 use models::Video;
 use regex::Regex;
 use simplelog::{error, CombinedLogger, Config, TermLogger, TerminalMode};
+use std::time::Duration;
 use std::{
     env,
     fs::{self, Permissions},
@@ -32,7 +33,7 @@ pub const EMBEDDED_MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 fn ensure_dir(dir: &str) -> Result<(), std::io::Error> {
     if let Err(e) = fs::create_dir_all(dir) {
-        if e.kind()!= ErrorKind::AlreadyExists {
+        if e.kind() != ErrorKind::AlreadyExists {
             return Err(e);
         }
     }
@@ -41,7 +42,7 @@ fn ensure_dir(dir: &str) -> Result<(), std::io::Error> {
 
 fn ensure_no_file(file: &str) -> Result<(), std::io::Error> {
     if let Err(e) = fs::remove_file(file) {
-        if e.kind()!= ErrorKind::NotFound {
+        if e.kind() != ErrorKind::NotFound {
             return Err(e);
         }
     }
@@ -52,6 +53,7 @@ fn ensure_no_file(file: &str) -> Result<(), std::io::Error> {
 async fn main() -> Result<()> {
     use self::schema::videos::dsl::*;
     let options = Options::parse();
+
     let logs_dir = options.download_dir.clone() + &options.logs_dir_relative;
 
     let logger = CombinedLogger::new(vec![TermLogger::new(
@@ -61,6 +63,11 @@ async fn main() -> Result<()> {
         simplelog::ColorChoice::Auto,
     )]);
 
+    let pb_style = Arc::new(
+        ProgressStyle::with_template("[{elapsed_precise}] {bar:40.cyan/blue} {bytes:>7}/{total_bytes:7}, {bytes_per_sec} {msg:>}")
+            .unwrap()
+            .progress_chars("##-"),
+    );
     let mp: Arc<Mutex<MultiProgress>> = Arc::new(Mutex::new(MultiProgress::new()));
 
     LogWrapper::new(Arc::clone(&mp).lock().unwrap().to_owned(), logger)
@@ -154,14 +161,17 @@ async fn main() -> Result<()> {
         ensure_dir(&(options.tmp_dir.clone() + "/" + &thr_id.to_string())).unwrap();
 
         // Spawn child
-        //TODO: move from args to env
         let _client = Command::new(thread_path.clone())
-            .env_clear()
+            // .env_clear()
             .env("MSP", msp)
             .env("THR_ID", thr_id.to_string())
             .env("LOG_DIR", logs_dir.clone())
             .env("DOWNLOAD_DIR", options.download_dir.clone())
             .env("TMP_DIR", options.tmp_dir.clone())
+            .env(
+                "YT_DLP_OUTPUT_TEMPLATE",
+                options.yt_dlp_output_template.clone(),
+            )
             .spawn()
             .with_context(|| format!("Unable to spawn thread {}", thr_id))?;
     }
@@ -174,11 +184,19 @@ async fn main() -> Result<()> {
             Ok(mut stream) => {
                 let batches = Arc::clone(&batches);
                 let connection = Arc::clone(&connection);
+                let pb_style = Arc::clone(&pb_style);
                 let msg = stream.read_json_msg::<Message>().unwrap();
-                let mut last_ds: DownloadStatus = Default::default();
+                let mp = Arc::clone(&mp);
+                let mut audio_ds: DownloadStatus = Default::default();
+                let mut video_ds: DownloadStatus = Default::default();
 
-                if msg != Message::Greeting(0) {
+                if std::mem::discriminant(&msg) != std::mem::discriminant(&Message::Greeting(0)) {
                     error!("Received non-greeting message from client: {:?}", msg);
+                    error!(
+                        "Discriminants: Client: {:?}, Greeting(0): {:?}",
+                        std::mem::discriminant(&msg),
+                        std::mem::discriminant(&Message::Greeting(0))
+                    );
                     panic!("Client sent garbage");
                 }
 
@@ -190,10 +208,16 @@ async fn main() -> Result<()> {
                 }
 
                 stream.write_json_msg(&msg).unwrap();
+
+                let pb = ProgressBar::new_spinner();
+                pb.set_length(10000);
+                pb.enable_steady_tick(Duration::from_millis(25));
+                mp.lock().unwrap().add(pb.clone());
+
                 let logs_dir = logs_dir.clone();
 
                 let handle = tokio::spawn(async move {
-                debug!("Thread {:?} functional", thr_id);
+                    debug!("Thread {:?} functional", thr_id);
                     loop {
                         let logs_dir = logs_dir.clone();
                         match stream.read_json_msg::<Message>().unwrap() {
@@ -234,14 +258,8 @@ async fn main() -> Result<()> {
 
                             // JSON
                             Message::JSON(msg) => {
-                                debug!("got JSON from socket {:?}", thr_id);
-
                                 let json: DownloadStatus = serde_json::from_str(&msg).unwrap_or_else(|e| {
-                                    std::fs::write(
-                                        "/home/mango/programming/rhytm/test_output/fucked.json",
-                                        &msg,
-                                    )
-                                    .unwrap();
+                                    std::fs::write(logs_dir.clone() + "fucked.json", &msg).unwrap();
                                     error!(
                                         "Parse failed @ {}:{}, message is {}",
                                         e.line(),
@@ -253,38 +271,62 @@ async fn main() -> Result<()> {
                                     error!("                           \\-- Error is here");
                                     panic!("Fucking json")
                                 });
+                                pb.set_message(format!(
+                                    "{} - {} [{}]",
+                                    json.info_dict
+                                        .creator
+                                        .clone()
+                                        .unwrap_or(json.info_dict.uploader.clone()),
+                                    json.info_dict.title.clone(),
+                                    json.info_dict.display_id.clone()
+                                ));
+                                pb.set_length(
+                                    json.total_bytes
+                                        .unwrap_or(json.total_bytes_estimate.unwrap_or(0.0) as usize) as u64,
+                                );
+                                pb.set_position(json.downloaded_bytes as u64);
 
                                 if json.status == "finished" {
                                     std::fs::write(
-                                        format!(
-                                            "{} {}", logs_dir + "/{}.json",
-                                            json.filename.replace("/", "_")
-                                        ),
+                                        format!("{}/{}.json", logs_dir, json.filename.replace("/", "_")),
                                         &serde_json::to_string_pretty(&json).unwrap(),
                                     )
                                     .expect("Unable to write json");
-                                    last_ds = json;
-                                    // let video_repr = NewVideo {
-                                    //     title: Some(json.info_dict.title),
-                                    //     author: json.info_dict.artist,
-                                    //     duration: Some(json.info_dict.duration.into()),
-                                    //     description: Some(json.info_dict.description),
-                                    //     uid: json.info_dict.display_id.clone(),
-                                    //     link: Some(json.info_dict.webpage_url),
-                                    // };
-                                    // let inserted_rows = diesel::insert_into(videos)
-                                    //     .values(video_repr)
-                                    //     .execute(&mut *connection.lock().unwrap())
-                                    //     .unwrap();
-                                    // debug!(
-                                    //     "Inserted video {}, {} rows affected",
-                                    //     json.info_dict.display_id, inserted_rows
-                                    // );
+                                    if json.info_dict.acodec == "none" {
+                                        video_ds = json.clone();
+                                    }
+                                    if json.info_dict.vcodec == "none" {
+                                        audio_ds = json.clone();
+                                    }
+                                    if json.info_dict.__real_download {
+                                        let video_repr = NewVideo {
+                                            title: Some(json.info_dict.title),
+                                            author: json.info_dict.artist,
+                                            duration: Some(json.info_dict.duration.into()),
+                                            description: Some(json.info_dict.description),
+                                            uid: json.info_dict.display_id.clone(),
+                                            link: Some(json.info_dict.webpage_url),
+                                        };
+                                        let inserted_rows = diesel::insert_into(videos)
+                                            .values(video_repr)
+                                            .execute(&mut *connection.lock().unwrap())
+                                            .unwrap();
+                                        debug!(
+                                            "Inserted video {}, {} rows affected",
+                                            json.info_dict.display_id, inserted_rows
+                                        );
+                                        pb.set_style(ProgressStyle::default_spinner());
+                                    }
                                 }
                                 //TODO: get the json model from wherever and parse it like that instead of stupid "Value" parsing
 
                                 //TODO! parse the fucking JSON, *insert approximately six hours of selfharm*
                             }
+                            Message::DownloadStart => {
+                                pb.set_style(pb_style.as_ref().clone());
+                                pb.tick()
+                            }
+                            Message::DownloadEnd => {}
                             Message::EndRequest => {
                                 unimplemented!("Unexpected EndRequest recieved from socket {:?}", thr_id)
                             }
