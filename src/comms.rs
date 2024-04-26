@@ -6,6 +6,13 @@ use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+const THREAD_COUNT: usize = 1;
+const LINK_BATCH_SIZE: usize = 5;
+const TMP_DIR: &str = "/tmp/rhytm"; // TODO: parse from args
+const DOWNLOAD_DIR: &str = "./test_music"; // TODO: parse from args
+const LOGS_DIR_RELATIVE: &str = "/logs/";
+const PARSE_REGEX_STR: &str = r"(https://(music)|(www)\.youtube\.com/)?(watch\?v=)([a-zA-Z0-9/\.\?=\-_]+)";
+
 pub trait MessageRead: std::io::Read {
     fn read_json_msg<T: for<'a> Deserialize<'a>>(&mut self) -> Result<T, Error>;
 }
@@ -44,30 +51,30 @@ impl MessageWrite for UnixStream {
 
 #[derive(Parser, Debug, Serialize, Deserialize)]
 #[command(version, author, about, long_about = None)]
-struct Options {
+pub struct Options {
     #[arg(short, long, default_value = "info")]
-    verbosity: LevelFilter,
+    pub verbosity: LevelFilter,
 
     #[arg(short='j', long, default_value_t = THREAD_COUNT)]
-    threads: usize,
+    pub threads: usize,
 
     #[arg(short='b', long, default_value_t = LINK_BATCH_SIZE)]
-    link_batch_size: usize,
+    pub link_batch_size: usize,
 
     #[arg(short, long, default_value = TMP_DIR)]
-    tmp_dir: String,
+    pub tmp_dir: String,
 
     #[arg(short, long, default_value = DOWNLOAD_DIR)]
-    download_dir: String,
+    pub download_dir: String,
 
     #[arg(short, long, default_value = LOGS_DIR_RELATIVE)]
-    logs_dir_relative: String,
+    pub logs_dir_relative: String,
 
     #[arg(short, long, default_value = PARSE_REGEX_STR)]
-    parse_regex_str: String,
+    pub parse_regex_str: String,
 
     #[arg(required(true))]
-    html_path: String,
+    pub html_path: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -84,22 +91,6 @@ pub enum Message {
     JSON(String),
     EndRequest,
 }
-
-// #[derive(Queryable, Selectable)]
-// #[diesel(check_for_backend(diesel))]
-// #[diesel(table_name = videos)]
-// pub struct VideoRepr {
-//     pub pk: String,
-//     pub uid: String,
-//     pub link: String,
-//     pub title: String,
-//     pub author: String,
-//     pub duration: u64,
-//     pub description: String,
-//     pub thumbnail_path: String,
-//     pub date: Date,
-//     pub other: String,
-// }
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(deny_unknown_fields)]
@@ -181,7 +172,7 @@ pub struct HeatPoint {
     end_time: f32,
     value: f32,
 }
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct InfoDict {
     //TODO: Perpetual update
@@ -283,7 +274,7 @@ pub struct InfoDict {
     pub creators: Option<Vec<String>>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Default)]
 #[serde(deny_unknown_fields)]
 pub struct DownloadStatus {
     //TODO: Perpetual update

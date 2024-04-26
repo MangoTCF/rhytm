@@ -1,5 +1,6 @@
 /target
-/test_data
-/test_output
+/test_
+/test_*
 *.webm
+*.mkv
 *.part

@@ -11,7 +11,7 @@ use diesel_migrations::MigrationHarness;
 use diesel_migrations::{embed_migrations, EmbeddedMigrations};
 use indicatif::MultiProgress;
 use indicatif_log_bridge::LogWrapper;
-use log::{debug, info, log, warn, LevelFilter};
+use log::{debug, info, log, warn};
 use models::Video;
 use regex::Regex;
 use simplelog::{error, CombinedLogger, Config, TermLogger, TerminalMode};
@@ -25,20 +25,34 @@ use std::{
 };
 use tokio::task::JoinHandle;
 
+use crate::comms::Options;
 use crate::models::NewVideo;
 
-const THREAD_COUNT: usize = 1;
-const LINK_BATCH_SIZE: usize = 5;
-const TMP_DIR: &str = "/tmp/rhytm"; // TODO: parse from args
-const DOWNLOAD_DIR: &str = "./test_music"; // TODO: parse from args
-const LOGS_DIR_RELATIVE: &str = "/logs/";
-const PARSE_REGEX_STR: &str = r"(https://(music)|(www)\.youtube\.com/)?(watch\?v=)([a-zA-Z0-9/\.\?=\-_]+)";
 pub const EMBEDDED_MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+
+fn ensure_dir(dir: &str) -> Result<(), std::io::Error> {
+    if let Err(e) = fs::create_dir_all(dir) {
+        if e.kind()!= ErrorKind::AlreadyExists {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
+
+fn ensure_no_file(file: &str) -> Result<(), std::io::Error> {
+    if let Err(e) = fs::remove_file(file) {
+        if e.kind()!= ErrorKind::NotFound {
+            return Err(e);
+        }
+    }
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     use self::schema::videos::dsl::*;
     let options = Options::parse();
+    let logs_dir = options.download_dir.clone() + &options.logs_dir_relative;
 
     let logger = CombinedLogger::new(vec![TermLogger::new(
         options.verbosity,
@@ -60,6 +74,7 @@ async fn main() -> Result<()> {
 
     let regex = Regex::new(&options.parse_regex_str).unwrap(); //TODO?: parse this from args
 
+    ensure_dir(&options.download_dir).unwrap();
     let mut connection = sqlite::SqliteConnection::establish(&(options.download_dir.to_string() + "/links.db")).unwrap();
 
     connection
@@ -125,61 +140,18 @@ async fn main() -> Result<()> {
     }
 
     // Ensure that all directories exist
-    match std::fs::create_dir(options.download_dir.clone()) {
-        Err(err) => {
-            if err.kind() != ErrorKind::AlreadyExists {
-                panic!("Unable to create {}: {}", options.download_dir, err);
-            }
-        }
-        Ok(_) => {}
-    }
-    match std::fs::create_dir(options.download_dir.to_owned() + &options.logs_dir_relative) {
-        Err(err) => {
-            if err.kind() != ErrorKind::AlreadyExists {
-                panic!(
-                    "Unable to create {}{}: {}",
-                    options.download_dir, options.logs_dir_relative, err
-                );
-            }
-        }
-        Ok(_) => {}
-    };
-    match std::fs::create_dir(options.tmp_dir.clone()) {
-        Err(err) => {
-            if err.kind() != ErrorKind::AlreadyExists {
-                panic!("Unable to create {}: {}", options.tmp_dir, err);
-            }
-        }
-        Ok(_) => {}
-    };
-    match std::fs::remove_file(options.tmp_dir.clone() + "/master.sock") {
-        Err(err) => {
-            if err.kind() != ErrorKind::AlreadyExists {
-                panic!(
-                    "Unable to create {}: {}",
-                    options.tmp_dir.clone() + "/master.sock",
-                    err
-                );
-            }
-        }
-        Ok(_) => {}
-    }
+    ensure_dir(&logs_dir).unwrap();
+    ensure_dir(&options.tmp_dir).unwrap();
 
+    ensure_no_file(&(options.tmp_dir.clone() + "/master.sock")).unwrap();
     let listener = UnixListener::bind(options.tmp_dir.clone() + "/master.sock")?;
 
-    let mut handles = Vec::<(JoinHandle<_>, usize)>::with_capacity(THREAD_COUNT);
+    let mut handles = Vec::<(JoinHandle<()>, usize)>::with_capacity(options.threads);
 
     for thr_id in 0..options.threads {
         let msp = options.tmp_dir.clone() + "/master.sock";
 
-        match std::fs::create_dir(options.tmp_dir.to_string() + "/" + &thr_id.to_string()) {
-            Err(err) => {
-                if err.kind() != ErrorKind::AlreadyExists {
-                    panic!("Unable to create {}: {}", options.tmp_dir, err)
-                }
-            }
-            Ok(_) => {}
-        };
+        ensure_dir(&(options.tmp_dir.clone() + "/" + &thr_id.to_string())).unwrap();
 
         // Spawn child
         //TODO: move from args to env
@@ -187,7 +159,9 @@ async fn main() -> Result<()> {
             .env_clear()
             .env("MSP", msp)
             .env("THR_ID", thr_id.to_string())
-            .env("key", val)
+            .env("LOG_DIR", logs_dir.clone())
+            .env("DOWNLOAD_DIR", options.download_dir.clone())
+            .env("TMP_DIR", options.tmp_dir.clone())
             .spawn()
             .with_context(|| format!("Unable to spawn thread {}", thr_id))?;
     }
@@ -201,6 +175,7 @@ async fn main() -> Result<()> {
                 let batches = Arc::clone(&batches);
                 let connection = Arc::clone(&connection);
                 let msg = stream.read_json_msg::<Message>().unwrap();
+                let mut last_ds: DownloadStatus = Default::default();
 
                 if msg != Message::Greeting(0) {
                     error!("Received non-greeting message from client: {:?}", msg);
@@ -215,10 +190,12 @@ async fn main() -> Result<()> {
                 }
 
                 stream.write_json_msg(&msg).unwrap();
+                let logs_dir = logs_dir.clone();
 
                 let handle = tokio::spawn(async move {
-                    debug!("Thread {:?} functional", thr_id);
+                debug!("Thread {:?} functional", thr_id);
                     loop {
+                        let logs_dir = logs_dir.clone();
                         match stream.read_json_msg::<Message>().unwrap() {
                             // Batch request
                             Message::BatchRequest => {
@@ -280,28 +257,29 @@ async fn main() -> Result<()> {
                                 if json.status == "finished" {
                                     std::fs::write(
                                         format!(
-                                            "/home/mango/programming/rhytm/test_output/{}.json",
+                                            "{} {}", logs_dir + "/{}.json",
                                             json.filename.replace("/", "_")
                                         ),
                                         &serde_json::to_string_pretty(&json).unwrap(),
                                     )
                                     .expect("Unable to write json");
-                                    let video_repr = NewVideo {
-                                        title: Some(json.info_dict.title),
-                                        author: json.info_dict.artist,
-                                        duration: Some(json.info_dict.duration.into()),
-                                        description: Some(json.info_dict.description),
-                                        uid: json.info_dict.display_id.clone(),
-                                        link: Some(json.info_dict.webpage_url),
-                                    };
-                                    let inserted_rows = diesel::insert_into(videos)
-                                        .values(video_repr)
-                                        .execute(&mut *connection.lock().unwrap())
-                                        .unwrap();
-                                    debug!(
-                                        "Inserted video {}, {} rows affected",
-                                        json.info_dict.display_id, inserted_rows
-                                    );
+                                    last_ds = json;
+                                    // let video_repr = NewVideo {
+                                    //     title: Some(json.info_dict.title),
+                                    //     author: json.info_dict.artist,
+                                    //     duration: Some(json.info_dict.duration.into()),
+                                    //     description: Some(json.info_dict.description),
+                                    //     uid: json.info_dict.display_id.clone(),
+                                    //     link: Some(json.info_dict.webpage_url),
+                                    // };
+                                    // let inserted_rows = diesel::insert_into(videos)
+                                    //     .values(video_repr)
+                                    //     .execute(&mut *connection.lock().unwrap())
+                                    //     .unwrap();
+                                    // debug!(
+                                    //     "Inserted video {}, {} rows affected",
+                                    //     json.info_dict.display_id, inserted_rows
+                                    // );
                                 }
                                 //TODO: get the json model from wherever and parse it like that instead of stupid "Value" parsing
 
