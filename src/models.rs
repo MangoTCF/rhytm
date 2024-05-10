@@ -13,7 +13,7 @@ pub struct Video {
     pub description: Option<String>,
 }
 
-#[derive(Insertable)]
+#[derive(Insertable, Debug)]
 #[diesel(table_name = crate::schema::videos)]
 pub struct NewVideo {
     pub uid: String,

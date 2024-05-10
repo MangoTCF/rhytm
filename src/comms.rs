@@ -193,11 +193,12 @@ pub struct InfoDict {
     pub fps: Option<f32>,
     pub quality: f32,
     pub stretched_ratio: Option<f32>,
-    pub vbr: f32,
+    pub vbr: Option<f32>,
     pub language_preference: Option<i32>,
     pub preference: Option<i32>,
     pub source_preference: i32,
     pub comment_count: Option<u32>,
+    #[serde(default)]
     pub channel_follower_count: u32,
     pub duration: u32,
     pub like_count: Option<u32>,
@@ -208,7 +209,7 @@ pub struct InfoDict {
     pub __real_download: bool,
     #[serde(default)]
     pub channel_is_verified: bool,
-    pub has_drm: bool,
+    pub has_drm: Value, //Either boolean or a string "maybe" fsfr
     pub is_live: bool,
     pub playable_in_embed: bool,
     pub was_live: bool,

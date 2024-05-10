@@ -81,6 +81,9 @@ async fn main() -> Result<()> {
 
     let regex = Regex::new(&options.parse_regex_str).unwrap(); //TODO?: parse this from args
 
+    // Ensure that all directories exist
+    ensure_dir(&logs_dir).unwrap();
+    ensure_dir(&options.tmp_dir).unwrap();
     ensure_dir(&options.download_dir).unwrap();
     let mut connection = sqlite::SqliteConnection::establish(&(options.download_dir.to_string() + "/links.db")).unwrap();
 
@@ -146,9 +149,7 @@ async fn main() -> Result<()> {
             .expect("Unable to set permissions, exiting");
     }
 
-    // Ensure that all directories exist
-    ensure_dir(&logs_dir).unwrap();
-    ensure_dir(&options.tmp_dir).unwrap();
+
 
     ensure_no_file(&(options.tmp_dir.clone() + "/master.sock")).unwrap();
     let listener = UnixListener::bind(options.tmp_dir.clone() + "/master.sock")?;
@@ -307,14 +308,11 @@ async fn main() -> Result<()> {
                                             uid: json.info_dict.display_id.clone(),
                                             link: Some(json.info_dict.webpage_url),
                                         };
+                                        debug!("Inserting video {:?}", video_repr);
                                         let inserted_rows = diesel::insert_into(videos)
                                             .values(video_repr)
                                             .execute(&mut *connection.lock().unwrap())
                                             .unwrap();
-                                        debug!(
-                                            "Inserted video {}, {} rows affected",
-                                            json.info_dict.display_id, inserted_rows
-                                        );
                                         pb.set_style(ProgressStyle::default_spinner());
                                     }
                                 }
